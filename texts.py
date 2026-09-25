@@ -92,6 +92,12 @@ T = {
 
     # ---------- Редактор (Mini App) ----------
     "k_setup":    {"ru": "🎨 Собрать бренд", "en": "🎨 Set up brand"},
+    "b_desktop":  {"ru": "💻 На компьютере", "en": "💻 On a computer"},
+    "b_open_desktop": {"ru": "Открыть редактор", "en": "Open the editor"},
+    "desktop_link": {"ru": "Ссылка на редактор для компьютера. Откройте её в браузере на компьютере — "
+                           "ссылка одноразовая и действует {min} минут. Вход сохранится на 7 дней.",
+                     "en": "A link to the editor for your computer. Open it in a browser on your computer — "
+                           "it works once and expires in {min} minutes. You'll stay signed in for 7 days."},
     "b_editor":   {"ru": "🎨 Редактор стиля", "en": "🎨 Style editor"},
     "wiz_done":   {"ru": "<i>Шаг 3 из 3</i>\n<b>Ваш стиль</b>\nОткройте редактор и соберите шаблоны: где стоит логотип, "
                          "какой шрифт у заголовка, нужна ли плашка, градиент или рамка. Для старта там уже есть два стиля — "

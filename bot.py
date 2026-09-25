@@ -228,7 +228,7 @@ def menu_kb(ctx, b, brands):
     if b["role"] == "owner":
         eb = editor_btn(ctx, b["id"])
         if eb and db.has_asset(b["id"], "logo"):
-            rows.append([eb])
+            rows.append([eb, Btn(tx(ctx, "b_desktop"), callback_data="menu:desktop")])
         elif not db.has_asset(b["id"], "logo"):
             rows.append([Btn(tx(ctx, "k_setup"), callback_data="menu:setup")])
         rows.append([Btn(tx(ctx, "b_team"), callback_data="menu:team")])
@@ -306,6 +306,9 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await ask_name(update, ctx)
     if action == "team":
         return await show_team(update, ctx, b, edit=True)
+    if action == "desktop":
+        await send_desktop_link(update, ctx, b)
+        return MENU
     if action == "new":   # кнопка из старых сообщений
         await say(update, tx(ctx, "q_hint"))
         return MENU
@@ -319,6 +322,29 @@ async def on_switch(update, ctx):
     if db.member_role(bid, update.effective_user.id):
         db.set_active_brand(update.effective_user.id, bid)
     return await show_menu(update, ctx, edit=True)
+
+
+async def send_desktop_link(update, ctx, b):
+    """Одноразовая ссылка на редактор для компьютера (15 минут)."""
+    if b["role"] != "owner":
+        await say(update, tx(ctx, "kit_owner_only"))
+        return
+    if not WEBAPP_URL:
+        await say(update, tx(ctx, "editor_off"))
+        return
+    tok = db.create_login_link(update.effective_user.id, b["id"])
+    url = f"{WEBAPP_URL}/?b={b['id']}&k={tok}"
+    await say(update, tx(ctx, "desktop_link", min=db.LINK_TTL_MIN),
+              KB([[Btn(tx(ctx, "b_open_desktop"), url=url)]]))
+
+
+async def cmd_desktop(update, ctx):
+    L(ctx, update)
+    b, _ = current_brand(update.effective_user.id)
+    if not b:
+        await say(update, tx(ctx, "welcome_new"))
+        return
+    await send_desktop_link(update, ctx, b)
 
 
 # ============ Доступ ============
@@ -926,6 +952,7 @@ def build_app(token=None):
         allow_reentry=True,
     )
     app.add_handler(CommandHandler("myid", cmd_myid))
+    app.add_handler(CommandHandler("desktop", cmd_desktop))
     app.add_handler(CommandHandler("newcode", cmd_newcode))
     app.add_handler(CommandHandler("codes", cmd_codes))
     app.add_handler(CommandHandler("brands", cmd_brands))

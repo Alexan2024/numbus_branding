@@ -53,6 +53,8 @@ button { cursor: pointer; }
 .section > h3 + .row, .section > .row:first-child { border-top: 0; }
 .row > label { flex: 0 0 34%; color: var(--fg); }
 .row > .ctl { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
+.row.stacked { flex-wrap: wrap; gap: 8px; }
+.row.stacked > label { flex-basis: 100%; }
 .val { min-width: 54px; text-align: right; color: var(--hint); font-size: 13px; }
 input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
 input[type=text], textarea, select {
@@ -147,6 +149,34 @@ textarea { resize: vertical; min-height: 64px; }
 .empty { padding: 28px 8px; text-align: center; color: var(--hint); }
 .footer-save { position: sticky; bottom: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px)); background: var(--bg2); }
 .hidden { display: none !important; }
+/* ---------- редактор: колонки, режимы, выдвижная панель ---------- */
+.col-stage { display: contents; }
+.col-side { min-width: 0; }
+.modes { display: flex; gap: 8px; align-items: center; padding: 12px 12px 0; }
+.modes .seg { flex: 1; }
+.icon.big { font-size: 20px; color: var(--fg); }
+.icon:disabled { opacity: .3; }
+.pts { display: grid; grid-template-columns: repeat(3, 34px); grid-template-rows: repeat(3, 34px); border: 1px solid var(--line); border-radius: 8px; }
+.pts button { border: 0; background: transparent; display: grid; place-items: center; }
+.pts button::after { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+.pts button[aria-pressed="true"]::after { width: 12px; height: 12px; background: var(--accent); }
+.drawer-head { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
+.drawer-head h3 { flex: 1; margin: 6px 0; }
+@media (max-width: 899px) {
+  #props.drawer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 8; margin: 0; max-height: 46vh; overflow: auto;
+    border-radius: 16px 16px 0 0; box-shadow: 0 -1px 0 var(--line), 0 -12px 32px rgba(0,0,0,.12);
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  #props.drawer.empty { display: none; }
+  #app.has-drawer .col-side { padding-bottom: 48vh; }
+}
+@media (min-width: 900px) {
+  #app { max-width: 760px; margin: 0 auto; }
+  #app.editor { max-width: none; display: grid; grid-template-columns: minmax(0, 1fr) 460px; height: 100vh; }
+  #app.editor .col-stage { display: block; height: 100vh; overflow: hidden; }
+  #app.editor .stage { position: static; height: 100%; justify-content: center; border-bottom: 0; border-right: 1px solid var(--line); }
+  #app.editor .col-side { height: 100vh; overflow: auto; }
+  body.browser { padding-bottom: 0; }
+}
 @media (prefers-reduced-motion: reduce) { .sheet { animation: none; } .switch::after { transition: none; } }
 </style>
 </head>
@@ -163,6 +193,8 @@ const tg = window.Telegram && window.Telegram.WebApp;
 const QS = new URLSearchParams(location.search);
 const BID = QS.get("b") || "";
 const INIT = (tg && tg.initData) || "";
+const IN_TG = !!INIT;               // внутри Telegram; иначе — браузер на компьютере
+let SESSION = "";
 
 /* ---------- тексты ---------- */
 const TT = {
@@ -219,6 +251,11 @@ const TT = {
     e_figma_rate: "Figma просит подождать минуту — попробуйте ещё раз.", e_figma_not_frame: "Ссылка ведёт не на фрейм — выделите фрейм целиком.",
     e_figma_timeout: "Figma долго не отвечает — попробуйте ещё раз.", e_empty: "В макете не нашлось ничего, кроме фото.",
     e_import_failed: "Не удалось разобрать макет.", e_http413: "Файл больше 60 МБ.",
+    modeStyle: "Стиль", modeLayers: "Слои", where: "Где", addLogo: "Добавить логотип", addTitle: "Добавить заголовок",
+    shade: "Затемнение", shadeNone: "Нет", shadeAll: "Всё фото", strength: "Плотность", showTag: "Показывать",
+    corner: "Угол", look: "Вид", lookText: "Текст", fine: "Тонкая настройка слоёв", undo: "Отменить", redo: "Вернуть",
+    logout: "Выйти на этом компьютере", errLogin: "Вход истёк или ссылка уже использована. Запросите новую в боте командой /desktop.",
+    back: "Шаблоны", close: "Закрыть", place: "Положение",
   },
   en: {
     templates: "Templates", brand: "Brand", newTpl: "New template", chooseStart: "Start from",
@@ -273,6 +310,11 @@ const TT = {
     e_figma_rate: "Figma asks to wait a minute — try again.", e_figma_not_frame: "The link doesn't point to a frame — select the whole frame.",
     e_figma_timeout: "Figma is taking too long — try again.", e_empty: "The layout has nothing but the photo.",
     e_import_failed: "Couldn't read the layout.", e_http413: "The file is over 60 MB.",
+    modeStyle: "Style", modeLayers: "Layers", where: "Position", addLogo: "Add logo", addTitle: "Add headline",
+    shade: "Shade", shadeNone: "None", shadeAll: "Whole photo", strength: "Strength", showTag: "Show",
+    corner: "Corner", look: "Look", lookText: "Text", fine: "Fine-tune layers", undo: "Undo", redo: "Redo",
+    logout: "Sign out on this computer", errLogin: "Your sign-in expired or the link was already used. Get a new one in the bot with /desktop.",
+    back: "Templates", close: "Close", place: "Placement",
   },
 };
 let LANG = "ru";
@@ -309,7 +351,7 @@ const uid = () => "l" + Math.random().toString(16).slice(2, 8);
 /* ---------- API ---------- */
 async function api(method, path, body, isForm) {
   const url = `/api/${path}${path.includes("?") ? "&" : "?"}b=${encodeURIComponent(BID)}`;
-  const headers = { "X-Init-Data": INIT };
+  const headers = IN_TG ? { "X-Init-Data": INIT } : { "X-Session": SESSION };
   if (body && !isForm) headers["Content-Type"] = "application/json";
   let r;
   try {
@@ -323,6 +365,7 @@ async function api(method, path, body, isForm) {
   return r;
 }
 function errText(e) {
+  if (e.code === "auth" && !IN_TG) return t("errLogin");
   if (e.code && TT.ru["e_" + e.code]) return t("e_" + e.code);
   return ({ net: t("errNet"), auth: t("errAuth"), owner_only: t("errOwner"), logo_bad: t("errLogo"),
             logo_empty: t("errLogoEmpty"), font_bad: t("errFont"), photo_bad: t("errPhoto"), limit: t("errLimit") })[e.code] || t("errNet");
@@ -694,13 +737,13 @@ async function loadAssets() {
 }
 
 function setBack(fn) {
-  if (!tg || !tg.BackButton) return;
+  if (!IN_TG || !tg.BackButton) return;
   if (APP._back) tg.BackButton.offClick(APP._back);
   APP._back = fn;
   if (fn) { tg.BackButton.onClick(fn); tg.BackButton.show(); } else tg.BackButton.hide();
 }
 function setMain(text, fn) {
-  const mb = tg && tg.MainButton;
+  const mb = IN_TG && tg.MainButton;
   if (!mb) return false;
   if (APP._main) mb.offClick(APP._main);
   APP._main = fn;
@@ -713,6 +756,7 @@ function go(screen) {
   if (screen !== "editor") { setMain(null); setBack(null); }
   const r = root();
   r.innerHTML = "";
+  r.className = "";
   if (screen === "editor") return renderEditor(r);
   r.append(h("div", { class: "top", role: "tablist" },
     h("button", { class: "tab", role: "tab", "aria-selected": String(screen === "templates"), onclick: () => go("templates") }, t("templates")),
@@ -922,13 +966,57 @@ function renderBrand(r) {
     h("div", { class: "hint", style: "flex:1" }, t("sampleHint")),
     h("button", { class: "btn ghost", onclick: () => pickFile("image/*", async f => { await upload("sample", f); go("brand"); }) }, t("replace"))));
   r.append(s6);
+  if (!IN_TG) r.append(h("div", { style: "padding: 0 12px 24px" }, h("button", { class: "btn danger", onclick: async () => {
+    try { await fetch("/auth/logout", { method: "POST", headers: { "X-Session": SESSION } }); } catch (e) {}
+    try { localStorage.removeItem("nb_session_" + BID); } catch (e) {}
+    SESSION = "";
+    root().innerHTML = "";
+    root().append(h("div", { class: "empty" }, t("errLogin")));
+  } }, t("logout"))));
 }
 
 /* ============================================================
    РЕДАКТОР ШАБЛОНА
    ============================================================ */
+const HIST = { past: [], future: [], last: null, t: 0 };
+function histReset() { HIST.past = []; HIST.future = []; HIST.last = JSON.stringify(APP.tpl); HIST.t = 0; updateUndoUI(); }
+function histRecord() {
+  const cur = JSON.stringify(APP.tpl);
+  if (cur === HIST.last) return;
+  const now = Date.now();
+  // изменения подряд (перетаскивание, ползунок) — один шаг истории
+  if (now - HIST.t > 600) {
+    HIST.past.push(HIST.last);
+    if (HIST.past.length > 80) HIST.past.shift();
+    HIST.future = [];
+  }
+  HIST.last = cur;
+  HIST.t = now;
+  updateUndoUI();
+}
+function histRestore(json) {
+  APP.tpl = JSON.parse(json);
+  HIST.last = json;
+  HIST.t = 0;
+  if (!layers().some(L => L.id === APP.sel)) APP.sel = null;
+  APP.dirty = true;
+  const y = window.scrollY, side = document.querySelector(".col-side"), sy = side ? side.scrollTop : 0;
+  go("editor");
+  window.scrollTo(0, y);
+  const side2 = document.querySelector(".col-side");
+  if (side2) side2.scrollTop = sy;
+}
+function undo() { if (!HIST.past.length) return; HIST.future.push(JSON.stringify(APP.tpl)); histRestore(HIST.past.pop()); }
+function redo() { if (!HIST.future.length) return; HIST.past.push(JSON.stringify(APP.tpl)); histRestore(HIST.future.pop()); }
+function updateUndoUI() {
+  const u = document.getElementById("undo"), r = document.getElementById("redo");
+  if (u) u.disabled = !HIST.past.length;
+  if (r) r.disabled = !HIST.future.length;
+}
 function openEditor(tp) {
   APP.tpl = clone(tp);
+  APP.mode = APP.mode || "style";
+  histReset();
   APP.dirty = false;
   APP.surface = "feed";
   APP.sel = null;
@@ -943,6 +1031,7 @@ function dims() {
   return FEED_SIZES[APP.fmt] || FEED_SIZES["4:5"];
 }
 function markDirty() {
+  histRecord();
   if (!APP.dirty) { APP.dirty = true; updateSaveUI(); }
   schedule();
 }
@@ -980,12 +1069,21 @@ function draw() {
   }
   fitStage();
 }
+const DESKTOP = window.matchMedia("(min-width: 900px)");
 function fitStage() {
   const cv = document.getElementById("stage");
   if (!cv) return;
   const [W, H] = dims();
-  const maxH = Math.max(220, window.innerHeight * 0.46);
-  const maxW = Math.min(window.innerWidth - 56, 520);
+  let maxH, maxW;
+  if (DESKTOP.matches) {
+    const col = document.querySelector(".col-stage");
+    maxH = window.innerHeight - 150;
+    maxW = (col ? col.clientWidth : window.innerWidth - 460) - 80;
+  } else {
+    const drawer = APP.mode === "layers" && APP.sel;
+    maxH = Math.max(200, window.innerHeight * (drawer ? 0.36 : 0.46));
+    maxW = Math.min(window.innerWidth - 56, 520);
+  }
   const k = Math.min(maxW / W, maxH / H);
   cv.style.width = Math.round(W * k) + "px";
   cv.style.height = Math.round(H * k) + "px";
@@ -998,7 +1096,7 @@ function updateSaveUI() {
   } else if (!APP.dirty) setMain(null);
 }
 async function saveTemplate() {
-  const mb = tg && tg.MainButton;
+  const mb = IN_TG && tg.MainButton;
   try {
     mb && mb.showProgress && mb.showProgress();
     const res = await (await api("PUT", `templates/${APP.tpl.id}`, { name: APP.tpl.name, spec: APP.tpl.spec })).json();
@@ -1020,30 +1118,37 @@ async function leaveEditor() {
 
 function renderEditor(r) {
   setBack(leaveEditor);
+  r.classList.add("editor");
   const spec = APP.tpl.spec;
-  // --- сцена ---
-  const cv = h("canvas", { id: "stage", "aria-label": APP.tpl.name });
+  // --- сцена (слева на компьютере, сверху на телефоне) ---
+  const cv = h("canvas", { id: "stage", "aria-label": APP.tpl.name, tabindex: "0" });
   const fileBtn = h("button", { class: "chip", onclick: () => pickFile("image/*", async f => { APP.localPhoto = await blobImage(f); schedule(); }) }, t("ownPhoto"));
   const fmts = APP.surface === "story" ? [] : Object.keys(FEED_SIZES).filter(k => !(k === "9:16" && spec.story.enabled));
   const stage = h("div", { class: "stage" },
     h("div", { class: "stagebar" },
       h("div", { class: "seg", role: "group" },
-        ...["feed", "story"].map(s => h("button", { "aria-pressed": String(APP.surface === s), onclick: () => { APP.surface = s; APP.sel = null; go("editor"); } }, t(s)))),
-    ),
+        ...["feed", "story"].map(s_ => h("button", { "aria-pressed": String(APP.surface === s_), onclick: () => { APP.surface = s_; APP.sel = null; go("editor"); } }, t(s_)))),
+      h("button", { class: "icon big", id: "undo", title: t("undo"), "aria-label": t("undo"), onclick: undo }, "↶"),
+      h("button", { class: "icon big", id: "redo", title: t("redo"), "aria-label": t("redo"), onclick: redo }, "↷")),
     h("div", { class: "frame" }, h("i"), h("i"), h("i"), h("i"), cv),
     h("div", { class: "stagebar chips" },
       ...fmts.map(f => h("button", { class: "chip", "aria-pressed": String(APP.fmt === f), onclick: () => { APP.fmt = f; go("editor"); } }, f)),
       fileBtn));
-  r.append(stage);
+  const side = h("div", { class: "col-side" });
+  r.append(h("div", { class: "col-stage" }, stage), side);
   bindDrag(cv);
 
-  // --- название ---
+  if (!IN_TG) side.append(h("div", { class: "modes" }, h("button", { class: "btn ghost", onclick: leaveEditor }, t("back"))));
+  side.append(h("div", { class: "modes" }, h("div", { class: "seg", role: "group" },
+    ...[["style", t("modeStyle")], ["layers", t("modeLayers")]].map(([m, l]) =>
+      h("button", { "aria-pressed": String(APP.mode === m), onclick: () => { if (APP.mode !== m) APP.sel = null; APP.mode = m; go("editor"); } }, l)))));
+
   const nameIn = h("input", { type: "text", value: APP.tpl.name, maxlength: 40, "aria-label": t("tplName") });
   nameIn.addEventListener("input", () => { APP.tpl.name = nameIn.value.slice(0, 40) || "—"; markDirty(); });
-  r.append(h("div", { class: "section" }, h("h3", {}, t("tplName")), h("div", { class: "row" }, nameIn)));
+  side.append(h("div", { class: "section" }, h("h3", {}, t("tplName")), h("div", { class: "row" }, nameIn)));
 
   if (APP.surface === "story" && !spec.story.enabled) {
-    r.append(h("div", { class: "section" },
+    side.append(h("div", { class: "section" },
       h("p", {}, t("storyOff")), h("p", { class: "hint" }, t("storyHint")),
       h("div", { class: "row" }, h("button", { class: "btn primary", onclick: () => {
         spec.story.enabled = true;
@@ -1051,25 +1156,26 @@ function renderEditor(r) {
         markDirty(); go("editor");
       } }, t("storyEnable"))),
       h("div", { class: "row" }, h("button", { class: "btn ghost", onclick: () => importSheet("story", APP.tpl.id) }, t("importStory")))));
-    tail(r);
+    tail(side);
     requestAnimationFrame(draw);
     return;
   }
   if (APP.surface === "story") {
-    r.append(h("div", { class: "section" }, h("div", { class: "row" }, h("label", {}, t("storyOn")),
+    side.append(h("div", { class: "section" }, h("div", { class: "row" }, h("label", {}, t("storyOn")),
       h("div", { class: "ctl", style: "justify-content:flex-end" }, sw(spec.story.enabled, v => { spec.story.enabled = v; markDirty(); go("editor"); })))));
   }
-
-  // --- слои ---
-  const ls = h("div", { class: "section", id: "layers" });
-  r.append(ls);
-  renderLayerList();
-  // --- свойства ---
-  r.append(h("div", { class: "section", id: "props" }));
-  renderProps();
-  // --- текст для превью ---
-  r.append(previewFields());
-  tail(r);
+  if (APP.mode === "style") {
+    side.append(h("div", { id: "simple" }));
+    renderSimple();
+  } else {
+    side.append(h("div", { class: "section", id: "layers" }));
+    renderLayerList();
+    side.append(h("div", { class: "section drawer", id: "props" }));
+    renderProps();
+  }
+  side.append(previewFields());
+  tail(side);
+  updateUndoUI();
   requestAnimationFrame(draw);
 }
 function tail(r) {
@@ -1079,7 +1185,7 @@ function tail(r) {
       h("button", { class: "btn ghost", onclick: duplicateTemplate }, t("dupTpl")),
       h("div", { style: "flex:1" }),
       h("button", { class: "btn danger", onclick: deleteTemplate }, t("delTpl")))));
-  if (!(tg && tg.MainButton)) {
+  if (!IN_TG) {
     r.append(h("div", { class: "footer-save" + (APP.dirty ? "" : " hidden"), id: "fallback-save" },
       h("button", { class: "btn primary block", onclick: saveTemplate }, t("save"))));
   }
@@ -1118,9 +1224,10 @@ function renderLayerList() {
 }
 function select(id) {
   APP.sel = id;
-  renderLayerList();
+  if (APP.mode === "layers") renderLayerList();
   renderProps();
   schedule();
+  fitStage();
 }
 function move(idx, dir) {
   const L = layers();
@@ -1248,7 +1355,7 @@ function colorCtl(label, get, set, opts) {
     wrap.append(h("div", { class: "hint" }, t("light")), pick(spec.light, v => set({ ...get(), light: v })));
     wrap.append(h("div", { class: "hint" }, t("dark")), pick(spec.dark, v => set({ ...get(), dark: v })));
   }
-  return h("div", { class: "row" }, h("label", {}, label), h("div", { class: "ctl" }, wrap));
+  return h("div", { class: "row stacked" }, h("label", {}, label), h("div", { class: "ctl" }, wrap));
 }
 const px = v => `${Math.round(v * 1080)} px`;
 const pct = v => `${Math.round(v * 100)}%`;
@@ -1261,12 +1368,114 @@ function posCtls(L) {
     slider(t("x"), () => L.x, x => L.x = x, xr[0], xr[1], 0.001, px),
     slider(t("y"), () => L.y, y => L.y = y, yr[0].toFixed(3), yr[1].toFixed(3), 0.001, px)];
 }
+const nearest = (v, arr) => arr.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
+function pointGrid(label, value, onPick) {
+  const grid = h("div", { class: "pts", role: "group", "aria-label": label });
+  for (const v of "tmb") for (const hz of "lcr") {
+    const a = v + hz;
+    grid.append(h("button", { "aria-pressed": String(value === a), "aria-label": a, onclick: () => { onPick(a); markDirty(); renderSimple(); } }));
+  }
+  return row(label, grid);
+}
+function card(title, ...kids) { return h("div", { class: "section" }, h("h3", {}, title), ...kids); }
+function renderSimple() {
+  const box = document.getElementById("simple");
+  if (!box) return;
+  box.innerHTML = "";
+  const Ls = layers();
+  const f = mostUsedFont();
+  const redraw = () => { markDirty(); renderSimple(); };
+
+  // Логотип
+  const lg = Ls.find(L => L.type === "logo");
+  if (!lg) box.append(card(t("logo"), h("div", { class: "row" }, h("button", { class: "btn ghost", onclick: () => {
+    Ls.push({ type: "logo", asset: "logo", anchor: "bl", x: 0.05, y: 0.05, w: 0.09, color: { ...CT }, opacity: 1, id: uid() }); redraw();
+  } }, "+ " + t("addLogo")))));
+  else box.append(card(t("logo"),
+    pointGrid(t("where"), lg.anchor, a => { lg.anchor = a; lg.x = a[1] === "c" ? 0 : 0.05; lg.y = a[0] === "m" ? 0 : 0.05; }),
+    seg(t("width"), [[0.06, "S"], [0.09, "M"], [0.13, "L"]], () => nearest(lg.w, [0.06, 0.09, 0.13]), v => lg.w = v),
+    colorCtl(t("color"), () => lg.color, c => { lg.color = c; markDirty(); }, { original: true })));
+
+  // Заголовок
+  const ti = Ls.find(L => L.type === "text" && L.source === "title");
+  if (!ti) box.append(card(t("srcTitle"), h("div", { class: "row" }, h("button", { class: "btn ghost", onclick: () => {
+    Ls.push({ type: "text", source: "title", anchor: "bl", x: 0.06, y: 0.08, font: f, weight: 700, size: 0.06, tracking: 0, leading: 1.05,
+              case: "none", align: "left", maxw: 0.85, color: { ...CT }, opacity: 1, id: uid() }); redraw();
+  } }, "+ " + t("addTitle")))));
+  else {
+    const fs = h("select", { "aria-label": t("font") });
+    for (const fo of APP.state.fonts) fs.append(h("option", { value: fo.key, selected: fo.key === ti.font ? true : null }, fo.label));
+    fs.addEventListener("change", () => {
+      ti.font = fs.value; const fi = fontInfo(ti.font);
+      ti.weight = Math.min(fi.max, Math.max(fi.min, ti.weight)); markDirty();
+    });
+    const vOf = () => ti.anchor[0];
+    box.append(card(t("srcTitle"),
+      row(t("font"), fs),
+      seg(t("size"), [[0.045, "S"], [0.06, "M"], [0.075, "L"], [0.095, "XL"]], () => nearest(ti.size, [0.045, 0.06, 0.075, 0.095]), v => ti.size = v),
+      seg(t("place"), [["t", t("top")], ["m", "≡"], ["b", t("bottom")]], vOf, v => {
+        ti.anchor = v + ti.anchor[1]; ti.y = v === "m" ? 0 : 0.08;
+      }),
+      seg(t("align"), [["left", t("left")], ["center", "⎯"], ["right", t("right")]], () => ti.align, v => {
+        ti.align = v; const hz = v === "left" ? "l" : v === "right" ? "r" : "c";
+        ti.anchor = ti.anchor[0] + hz; ti.x = hz === "c" ? 0 : 0.06; if (!ti.maxw) ti.maxw = 0.85;
+      }),
+      h("div", { class: "row" }, h("label", {}, t("plate")), h("div", { class: "ctl", style: "justify-content:flex-end" },
+        sw(!!ti.plate, v => { if (v) ti.plate = { color: { mode: "fixed", value: "p2" }, opacity: 1, radius: 0, padx: 0.8, pady: 0.55 }; else delete ti.plate; redraw(); }))),
+      colorCtl(t("color"), () => ti.color, c => { ti.color = c; markDirty(); })));
+  }
+
+  // Хештег
+  const tg_ = Ls.find(L => L.type === "text" && L.source === "hashtag");
+  const tagCard = card(t("srcHashtag"), h("div", { class: "row" }, h("label", {}, t("showTag")),
+    h("div", { class: "ctl", style: "justify-content:flex-end" }, sw(tg_ && !tg_.hidden, v => {
+      if (!tg_) Ls.push({ type: "text", source: "hashtag", anchor: "tr", x: 0.05, y: 0.05, font: f, weight: 500, size: 0.026, tracking: 0,
+                          leading: 1.1, case: "none", align: "right", maxw: 0, color: { ...CT }, opacity: 1, id: uid() });
+      else if (v) delete tg_.hidden; else tg_.hidden = true;
+      redraw();
+    }))));
+  if (tg_ && !tg_.hidden) {
+    tagCard.append(
+      seg(t("corner"), [["tl", "↖"], ["tr", "↗"], ["bl", "↙"], ["br", "↘"]], () => tg_.anchor, a => {
+        tg_.anchor = a; tg_.x = 0.05; tg_.y = 0.05; tg_.align = a[1] === "r" ? "right" : "left";
+      }),
+      seg(t("look"), [["plain", t("lookText")], ["plate", t("plate")]], () => tg_.plate ? "plate" : "plain", v => {
+        if (v === "plate") { tg_.plate = { color: { mode: "fixed", value: "p2" }, opacity: 1, radius: 0.5, padx: 0.75, pady: 0.55 }; tg_.color = { mode: "fixed", value: "p1" }; }
+        else { delete tg_.plate; tg_.color = { ...CT }; }
+      }));
+  }
+  box.append(tagCard);
+
+  // Затемнение
+  const sh = Ls.find(L => L.type === "gradient" || L.type === "overlay");
+  const cur = !sh ? "none" : sh.type === "overlay" ? "all" : sh.side;
+  const shCard = card(t("shade"), seg(null, [["none", t("shadeNone")], ["bottom", t("bottom")], ["top", t("top")], ["all", t("shadeAll")]], () => cur, v => {
+    const i = Ls.indexOf(sh);
+    if (i >= 0) Ls.splice(i, 1);
+    if (v === "all") Ls.unshift({ type: "overlay", color: { mode: "fixed", value: "p1" }, opacity: 0.3, id: uid() });
+    else if (v !== "none") Ls.unshift({ type: "gradient", side: v, extent: 0.5, color: { mode: "fixed", value: "p1" }, opacity: 0.75, adaptive: true, id: uid() });
+    redraw();
+  }));
+  if (sh) shCard.append(slider(t("strength"), () => sh.opacity, v => sh.opacity = v, 0, sh.type === "overlay" ? 0.9 : 1, 0.01, pct));
+  box.append(shCard);
+
+  box.append(h("div", { style: "padding: 0 12px" }, h("button", { class: "btn block", style: "background: var(--bg)",
+    onclick: () => { APP.mode = "layers"; APP.sel = null; go("editor"); } }, t("fine"))));
+}
 function renderProps() {
+  if (APP.mode === "style") return renderSimple();
+  return renderLayerProps();
+}
+function renderLayerProps() {
   const box = document.getElementById("props");
   if (!box) return;
   box.innerHTML = "";
-  box.append(h("h3", {}, t("props")));
   const L = selLayer();
+  box.classList.toggle("empty", !L);
+  const app = document.getElementById("app");
+  if (app) app.classList.toggle("has-drawer", !!L);
+  box.append(h("div", { class: "drawer-head" }, h("h3", {}, L ? layerTitle(L) : t("props")),
+    L ? h("button", { class: "icon", "aria-label": t("close"), title: t("close"), onclick: () => { APP.sel = null; renderLayerList(); renderProps(); schedule(); fitStage(); } }, "✕") : null));
   if (!L) { box.append(h("p", { class: "hint" }, t("selectHint"))); return; }
   const add = (...els) => box.append(...els);
   if (L.type === "logo") {
@@ -1382,15 +1591,40 @@ function previewFields() {
 }
 
 /* ---------- перетаскивание на сцене ---------- */
-function bindDrag(cv) {
-  const toCanvas = e => {
-    const r = cv.getBoundingClientRect();
-    return [(e.clientX - r.left) * cv.width / r.width, (e.clientY - r.top) * cv.height / r.height];
-  };
-  const movable = L => L && !L.hidden && !(L.type === "gradient" || L.type === "overlay"
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+function movable(L) {
+  return L && !L.hidden && !(L.type === "gradient" || L.type === "overlay"
     || (L.type === "rect" && L.fit === "inset") || (L.type === "image" && L.fit !== "box"));
+}
+function scalable(L) {
+  return movable(L) && (L.type === "logo" || L.type === "text" || L.type === "image" || L.type === "rect");
+}
+function sizeOf(L) { return L.type === "text" ? { size: L.size } : L.type === "rect" ? { w: L.w, h: L.h } : { w: L.w }; }
+function applyScale(L, base, k) {
+  const r4 = v => Math.round(v * 10000) / 10000;
+  if (L.type === "text") L.size = r4(clamp(base.size * k, 0.005, 0.4));
+  else if (L.type === "rect") { L.w = r4(clamp(base.w * k, 0.001, 2)); L.h = r4(clamp(base.h * k, 0.001, 4)); }
+  else L.w = r4(clamp(base.w * k, 0.01, 1.2));
+}
+function bindDrag(cv) {
+  const pts = new Map();
+  let pinch = null;
+  const toCanvas = (cx, cy) => {
+    const r = cv.getBoundingClientRect();
+    return [(cx - r.left) * cv.width / r.width, (cy - r.top) * cv.height / r.height];
+  };
+  const spread = () => { const [a, b] = [...pts.values()]; return Math.hypot(a[0] - b[0], a[1] - b[1]) || 1; };
   cv.addEventListener("pointerdown", e => {
-    const [x, y] = toCanvas(e);
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
+    try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+    if (pts.size === 2) {                     // второй палец — масштаб выбранного слоя
+      APP.drag = null; APP.guides = null;
+      const L = selLayer();
+      pinch = scalable(L) ? { d0: spread(), base: sizeOf(L) } : null;
+      e.preventDefault();
+      return;
+    }
+    const [x, y] = toCanvas(e.clientX, e.clientY);
     const tol = cv.width * 0.02;
     const L = layers();
     let hit = null;
@@ -1400,15 +1634,19 @@ function bindDrag(cv) {
     for (let i = L.length - 1; i >= 0 && !hit; i--) if (movable(L[i]) && inBox(APP.boxes[L[i].id], tol)) hit = L[i];
     if (!hit) return;
     if (hit.id !== APP.sel) select(hit.id);
-    cv.setPointerCapture(e.pointerId);
     APP.drag = { id: hit.id, x0: x, y0: y, lx: hit.x || 0, ly: hit.y || 0 };
     e.preventDefault();
   });
   cv.addEventListener("pointermove", e => {
-    if (!APP.drag) return;
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
     const L = selLayer();
-    if (!L) return;
-    const [x, y] = toCanvas(e);
+    if (pinch && pts.size >= 2) {
+      if (L) { applyScale(L, pinch.base, spread() / pinch.d0); markDirty(); }
+      return;
+    }
+    if (!APP.drag || !L) return;
+    const [x, y] = toCanvas(e.clientX, e.clientY);
     const W = cv.width;
     const dx = (x - APP.drag.x0) / W, dy = (y - APP.drag.y0) / W;
     const hz = L.anchor[1], v = L.anchor[0];
@@ -1421,7 +1659,9 @@ function bindDrag(cv) {
     L.y = Math.round(ny * 1000) / 1000;
     markDirty();
   });
-  const end = () => {
+  const end = e => {
+    pts.delete(e.pointerId);
+    if (pts.size < 2 && pinch) { pinch = null; renderProps(); }
     if (!APP.drag) return;
     APP.drag = null;
     APP.guides = null;
@@ -1430,7 +1670,51 @@ function bindDrag(cv) {
   };
   cv.addEventListener("pointerup", end);
   cv.addEventListener("pointercancel", end);
+  // Щипок на тачпаде (приходит как wheel + ctrl) и Ctrl/⌘ + колесо
+  let wheelTimer = 0;
+  cv.addEventListener("wheel", e => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const L = selLayer();
+    if (!scalable(L)) return;
+    e.preventDefault();
+    applyScale(L, sizeOf(L), Math.exp(-e.deltaY * 0.01));
+    markDirty();
+    clearTimeout(wheelTimer);
+    wheelTimer = setTimeout(renderProps, 250);
+  }, { passive: false });
 }
+
+/* ---------- клавиатура на компьютере ---------- */
+document.addEventListener("keydown", e => {
+  if (APP.screen !== "editor" || !APP.tpl) return;
+  const tag = (e.target && e.target.tagName) || "";
+  const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); if (APP.dirty) saveTemplate(); return; }
+  if (typing) return;
+  if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if (mod && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); return; }
+  const L = selLayer();
+  if (!L) return;
+  if (e.key === "Escape") { APP.sel = null; renderLayerList(); renderProps(); schedule(); return; }
+  if ((e.key === "Delete" || e.key === "Backspace") && APP.mode === "layers") {
+    e.preventDefault();
+    const arr = layers(); arr.splice(arr.indexOf(L), 1); APP.sel = null; markDirty(); renderLayerList(); renderProps();
+    return;
+  }
+  const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  if (arrows[e.key] && movable(L)) {
+    e.preventDefault();
+    const step = (e.shiftKey ? 10 : 1) / dims()[0];        // 1 px (или 10) на холсте
+    const [dx, dy] = arrows[e.key];
+    const hz = L.anchor[1], v = L.anchor[0];
+    L.x = Math.round(((L.x || 0) + (hz === "r" ? -dx : dx) * step) * 10000) / 10000;
+    L.y = Math.round(((L.y || 0) + (v === "b" ? -dy : dy) * step) * 10000) / 10000;
+    markDirty();
+    clearTimeout(APP._nudge);
+    APP._nudge = setTimeout(renderProps, 250);
+  }
+});
 
 /* ---------- проверка итогом сервера, дублирование, удаление ---------- */
 async function serverCheck() {
@@ -1468,8 +1752,22 @@ async function deleteTemplate() {
 /* ---------- старт ---------- */
 window.addEventListener("resize", () => APP.screen === "editor" && fitStage());
 (async function boot() {
-  if (tg) {
+  if (IN_TG) {
     try { tg.ready(); tg.expand(); tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (e) {}
+  } else {
+    // Браузер: одноразовая ссылка из бота (?k=…) меняется на сессию, она живёт 7 дней
+    document.body.classList.add("browser");
+    const key = "nb_session_" + BID;
+    const k = QS.get("k");
+    if (k) {
+      try {
+        const r = await fetch("/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ k }) });
+        if (r.ok) { const j = await r.json(); try { localStorage.setItem(key, j.session); } catch (e) { SESSION = j.session; } }
+      } catch (e) {}
+      QS.delete("k");
+      history.replaceState(null, "", location.pathname + "?" + QS.toString());
+    }
+    try { SESSION = SESSION || localStorage.getItem(key) || ""; } catch (e) {}
   }
   try {
     await loadState();

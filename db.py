@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS templates (
     updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_templates_brand ON templates (brand_id, sort);
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,              -- link (одноразовая, 15 мин) | session (7 дней)
+    tg_id INTEGER NOT NULL,
+    brand_id INTEGER NOT NULL,
+    expires TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS prefs (
     tg_id INTEGER NOT NULL,
     brand_id INTEGER NOT NULL,
@@ -442,3 +449,54 @@ def gc_images(brand_id: int) -> int:
     for k in dead:
         del_asset(brand_id, k)
     return len(dead)
+
+
+# ============ Вход на компьютере: одноразовая ссылка → сессия ============
+LINK_TTL_MIN = 15
+SESSION_TTL_DAYS = 7
+
+
+def _token():
+    import secrets
+    return secrets.token_urlsafe(24)
+
+
+def create_login_link(tg_id: int, brand_id: int) -> str:
+    tok = _token()
+    exp = _now() + timedelta(minutes=LINK_TTL_MIN)
+    with _conn() as c:
+        c.execute("DELETE FROM sessions WHERE expires < ?", (_now().isoformat(),))
+        c.execute("INSERT INTO sessions (token, kind, tg_id, brand_id, expires) VALUES (?,?,?,?,?)",
+                  (tok, "link", tg_id, brand_id, exp.isoformat()))
+    return tok
+
+
+def redeem_login_link(tok: str):
+    """Одноразовая ссылка → (session_token, tg_id, brand_id) или None."""
+    with _conn() as c:
+        r = c.execute("SELECT * FROM sessions WHERE token=? AND kind='link'", (tok or "",)).fetchone()
+        if not r:
+            return None
+        c.execute("DELETE FROM sessions WHERE token=?", (tok,))
+        if r["expires"] < _now().isoformat():
+            return None
+        sess = _token()
+        c.execute("INSERT INTO sessions (token, kind, tg_id, brand_id, expires) VALUES (?,?,?,?,?)",
+                  (sess, "session", r["tg_id"], r["brand_id"],
+                   (_now() + timedelta(days=SESSION_TTL_DAYS)).isoformat()))
+        return sess, r["tg_id"], r["brand_id"]
+
+
+def check_session(tok: str):
+    if not tok:
+        return None
+    with _conn() as c:
+        r = c.execute("SELECT * FROM sessions WHERE token=? AND kind='session'", (tok,)).fetchone()
+    if not r or r["expires"] < _now().isoformat():
+        return None
+    return r["tg_id"], r["brand_id"]
+
+
+def drop_session(tok: str):
+    with _conn() as c:
+        c.execute("DELETE FROM sessions WHERE token=?", (tok or "",))

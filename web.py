@@ -71,18 +71,24 @@ def jerr(status, code):
 async def auth_mw(request, handler):
     if not request.path.startswith("/api/"):
         return await handler(request)
-    user = check_init_data(request.headers.get("X-Init-Data", ""), request.app["token"])
-    if not user:
-        return jerr(401, "auth")
     try:
         bid = int(request.query.get("b", "0"))
     except ValueError:
         return jerr(400, "brand")
-    if db.member_role(bid, int(user["id"])) != "owner":
+    user = check_init_data(request.headers.get("X-Init-Data", ""), request.app["token"])
+    if user:
+        uid = int(user["id"])
+    else:
+        # Вход с компьютера: сессия, выданная по одноразовой ссылке из бота
+        sess = db.check_session(request.headers.get("X-Session", ""))
+        if not sess or sess[1] != bid:
+            return jerr(401, "auth")
+        uid = sess[0]
+    if db.member_role(bid, uid) != "owner":
         return jerr(403, "owner_only")
-    request["uid"] = int(user["id"])
+    request["uid"] = uid
     request["bid"] = bid
-    request["lang"] = (db.get_user(int(user["id"])) or {}).get("lang", "ru")
+    request["lang"] = (db.get_user(uid) or {}).get("lang", "ru")
     return await handler(request)
 
 
@@ -483,11 +489,31 @@ async def api_import_figma(request):
         return jerr(422, "import_failed")
 
 
+# ============ Вход с компьютера ============
+async def auth_login(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return jerr(400, "json")
+    res = db.redeem_login_link(str(body.get("k") or ""))
+    if not res:
+        return jerr(401, "link")
+    sess, uid, bid = res
+    return web.json_response({"session": sess, "b": bid})
+
+
+async def auth_logout(request):
+    db.drop_session(request.headers.get("X-Session", ""))
+    return web.json_response({"ok": True})
+
+
 def build_web(token: str) -> web.Application:
     app = web.Application(middlewares=[auth_mw], client_max_size=IMPORT_MAX)
     app["token"] = token
     app.router.add_get("/", index)
     app.router.add_get("/fonts/{name}", font_file)
+    app.router.add_post("/auth/login", auth_login)
+    app.router.add_post("/auth/logout", auth_logout)
     app.router.add_get("/api/state", api_state)
     app.router.add_put("/api/kit", api_kit)
     app.router.add_get("/api/asset/{kind}", api_asset)
