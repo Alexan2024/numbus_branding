@@ -1,0 +1,5 @@
+python-telegram-bot==20.7
+Pillow==10.2.0
+pillow-avif-plugin==1.5.5
+pillow-heif==0.16.0
+numpy==1.26.4
