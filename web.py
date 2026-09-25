@@ -7,6 +7,7 @@ Telegram: заголовок X-Init-Data проверяется HMAC-ом по �
 """
 import os
 import io
+import re
 import json
 import hmac
 import time
@@ -15,18 +16,23 @@ import hashlib
 import logging
 from urllib.parse import parse_qsl
 
+import aiohttp
 from aiohttp import web
 from PIL import Image
 
 import db
 import render as R
 import spec as S
+import importer as I
 
 logger = logging.getLogger("numbus.web")
 BASE = os.path.dirname(os.path.abspath(__file__))
 WEBAPP_FILE = os.path.join(BASE, "webapp.html")
 INIT_MAX_AGE = 24 * 3600
-UPLOAD_KINDS = {"logo", "logo_alt", "sample"} | set(R.CUSTOM_FONT_SLOTS)
+IMPORT_MAX = 60 * 1024 * 1024          # PSD бывают тяжёлыми
+IMG_KIND = re.compile(r"^img_[0-9a-f]{12}$")
+FIGMA_API = "https://api.figma.com/v1"
+UPLOAD_KINDS = {"logo", "logo_alt", "sample", "image"} | set(R.CUSTOM_FONT_SLOTS)
 _SEM = asyncio.Semaphore(2)
 _DEFAULT_SAMPLE = None
 
@@ -159,7 +165,7 @@ def _default_sample_jpeg():
 
 async def api_asset(request):
     bid, kind = request["bid"], request.match_info["kind"]
-    if kind not in ("logo", "logo_alt", "sample"):
+    if kind not in ("logo", "logo_alt", "sample") and not IMG_KIND.match(kind):
         raise web.HTTPNotFound()
     data = db.get_asset(bid, kind)
     if not data:
@@ -167,7 +173,8 @@ async def api_asset(request):
             return web.Response(body=await heavy(_default_sample_jpeg), content_type="image/jpeg")
         raise web.HTTPNotFound()
     ctype = "image/jpeg" if kind == "sample" else "image/png"
-    return web.Response(body=data, content_type=ctype, headers={"Cache-Control": "no-cache"})
+    cache = "public, max-age=31536000, immutable" if kind.startswith("img_") else "no-cache"
+    return web.Response(body=data, content_type=ctype, headers={"Cache-Control": cache})
 
 
 async def api_font(request):
@@ -186,6 +193,15 @@ def _prep_sample(data):
     return R.to_jpeg(img, 88)
 
 
+def _prep_layer_image(data):
+    img = R.open_image(data).convert("RGBA")
+    img.thumbnail((2400, 2400), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "PNG", optimize=True)
+    png = buf.getvalue()
+    return "img_" + hashlib.sha1(png).hexdigest()[:12], png
+
+
 async def api_upload(request):
     bid, kind = request["bid"], request.match_info["kind"]
     if kind not in UPLOAD_KINDS:
@@ -195,7 +211,7 @@ async def api_upload(request):
     if part is None or part.name != "file":
         return jerr(400, "file")
     filename = part.filename or ""
-    data = await part.read(decode=False)
+    data = bytes(await part.read(decode=False))
     if not data:
         return jerr(400, "empty")
     if kind in ("logo", "logo_alt"):
@@ -207,6 +223,13 @@ async def api_upload(request):
             return jerr(422, "logo_bad")
         db.set_asset(bid, kind, png)
         return web.json_response({"ok": True, "bg_removed": not had_alpha})
+    if kind == "image":
+        try:
+            aid, png = await heavy(_prep_layer_image, data)
+        except Exception:
+            return jerr(422, "photo_bad")
+        db.set_asset(bid, aid, png)
+        return web.json_response({"ok": True, "asset": aid})
     if kind == "sample":
         try:
             jpg = await heavy(_prep_sample, data)
@@ -264,13 +287,26 @@ async def api_tpl_update(request):
         return jerr(400, "json")
     if not db.update_template(request["bid"], int(request.match_info["tid"]), name, spec):
         return jerr(404, "template")
+    db.gc_images(request["bid"])
     return web.json_response({"id": int(request.match_info["tid"]), "name": name, "spec": spec})
 
 
 async def api_tpl_delete(request):
     if not db.delete_template(request["bid"], int(request.match_info["tid"])):
         return jerr(404, "template")
+    db.gc_images(request["bid"])
     return web.json_response({"ok": True})
+
+
+def image_loader(bid):
+    cache = {}
+
+    def load(asset):
+        if asset not in cache:
+            data = db.get_asset(bid, asset) if isinstance(asset, str) and asset.startswith("img_") else None
+            cache[asset] = Image.open(io.BytesIO(data)).convert("RGBA") if data else None
+        return cache[asset]
+    return load
 
 
 def brand_ctx(bid, fields=None, dark=0.0):
@@ -282,7 +318,7 @@ def brand_ctx(bid, fields=None, dark=0.0):
         if data:
             logos[k] = Image.open(io.BytesIO(data)).convert("RGBA")
     customs = {slot: db.get_asset(bid, slot) for slot in (kit.get("custom_fonts") or {})}
-    return R.Ctx(S.sanitize_palette(kit.get("palette")), logos, customs, fields or {}, dark)
+    return R.Ctx(S.sanitize_palette(kit.get("palette")), logos, customs, fields or {}, dark, image_loader(bid))
 
 
 def _server_preview(bid, spec, surface, fmt, fields):
@@ -314,8 +350,141 @@ async def api_preview(request):
     return web.Response(body=jpg, content_type="image/jpeg")
 
 
+# ============ Импорт макетов ============
+def _customs(bid):
+    kit = db.get_brand(bid)["kit"]
+    names = kit.get("custom_fonts") or {}
+    return {slot: db.get_asset(bid, slot) for slot in names}, names
+
+
+def _import_file_job(bid, data, filename):
+    customs, names = _customs(bid)
+    return I.build(I.parse_file(data, filename), customs, names)
+
+
+def _import_figma_job(bid, plan, images):
+    customs, names = _customs(bid)
+    return I.build(I.figma_assemble(plan, images), customs, names)
+
+
+def _save_import(bid, result, target, tid, name):
+    layers, assets, report = result
+    if not layers:
+        raise I.ImportFail("empty")
+    for aid, png in assets.items():
+        db.set_asset(bid, aid, png)
+    if target == "story" and tid:
+        tpl = db.get_template(bid, tid)
+        if not tpl:
+            raise I.ImportFail("template")
+        spec = tpl["spec"]
+        spec["story"] = {"enabled": True, "layers": layers}
+        spec = S.sanitize_spec(spec)
+        db.update_template(bid, tid, tpl["name"], spec)
+        out = {"id": tid, "name": tpl["name"], "spec": spec}
+    else:
+        spec = S.sanitize_spec({"feed": {"layers": layers}, "story": {"enabled": False, "layers": []}})
+        name = (name or report.get("name") or "Импорт").strip()[:40] or "Импорт"
+        new_id = db.create_template(bid, name, spec)
+        if not new_id:
+            raise I.ImportFail("limit")
+        out = {"id": new_id, "name": name, "spec": spec}
+    db.gc_images(bid)
+    return {"template": out, "report": report}
+
+
+def _import_error(e):
+    status = 409 if e.code == "limit" else 422
+    return web.json_response({"error": e.code}, status=status)
+
+
+async def api_import(request):
+    """Файл макета: PSD, AI, PDF или PNG. Поля: target=new|story, tid, file."""
+    bid = request["bid"]
+    target, tid, data, filename = "new", None, None, ""
+    reader = await request.multipart()
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if part.name == "target":
+            target = "story" if (await part.text()).strip() == "story" else "new"
+        elif part.name == "tid":
+            txt = (await part.text()).strip()
+            tid = int(txt) if txt.isdigit() else None
+        elif part.name == "file":
+            filename = part.filename or ""
+            data = bytes(await part.read(decode=False))   # pdfium не принимает bytearray
+    if not data:
+        return jerr(400, "file")
+    try:
+        result = await heavy(_import_file_job, bid, data, filename)
+        return web.json_response(_save_import(bid, result, target, tid, None))
+    except I.ImportFail as e:
+        return _import_error(e)
+    except Exception as e:
+        logger.exception("import %s: %s", filename, e)
+        return jerr(422, "import_failed")
+
+
+async def _figma_get(session, url, token, **params):
+    async with session.get(url, params=params, headers={"X-Figma-Token": token}) as r:
+        if r.status in (401, 403):
+            raise I.ImportFail("figma_token")
+        if r.status == 404:
+            raise I.ImportFail("figma_access")
+        if r.status == 429:
+            raise I.ImportFail("figma_rate")
+        if r.status != 200:
+            raise I.ImportFail("figma_http", str(r.status))
+        return await r.json()
+
+
+async def api_import_figma(request):
+    """Фрейм Figma по ссылке. Токен используется для одного запроса и не сохраняется."""
+    bid = request["bid"]
+    try:
+        body = await request.json()
+    except Exception:
+        return jerr(400, "json")
+    token = str(body.get("token") or "").strip()
+    target = "story" if body.get("target") == "story" else "new"
+    tid = body.get("tid") if isinstance(body.get("tid"), int) else None
+    if not token:
+        return jerr(422, "figma_token")
+    try:
+        key, node = I.figma_ref(str(body.get("url") or ""))
+        timeout = aiohttp.ClientTimeout(total=90)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            doc = await _figma_get(s, f"{FIGMA_API}/files/{key}/nodes", token, ids=node)
+            frame = ((doc.get("nodes") or {}).get(node) or {}).get("document")
+            if not frame:
+                raise I.ImportFail("figma_access")
+            plan = I.figma_plan(frame)
+            ids = [r["id"] for r in plan["render"]]
+            images = {}
+            scale = f"{max(0.01, min(4.0, plan['k'])):.3f}"
+            for i in range(0, len(ids), 40):
+                res = await _figma_get(s, f"{FIGMA_API}/images/{key}", token,
+                                       ids=",".join(ids[i:i + 40]), format="png", scale=scale)
+                for nid, url in (res.get("images") or {}).items():
+                    if url:
+                        async with s.get(url) as r:
+                            if r.status == 200:
+                                images[nid] = await r.read()
+        result = await heavy(_import_figma_job, bid, plan, images)
+        return web.json_response(_save_import(bid, result, target, tid, None))
+    except I.ImportFail as e:
+        return _import_error(e)
+    except asyncio.TimeoutError:
+        return jerr(422, "figma_timeout")
+    except Exception as e:
+        logger.exception("figma import: %s", type(e).__name__)
+        return jerr(422, "import_failed")
+
+
 def build_web(token: str) -> web.Application:
-    app = web.Application(middlewares=[auth_mw], client_max_size=20 * 1024 * 1024)
+    app = web.Application(middlewares=[auth_mw], client_max_size=IMPORT_MAX)
     app["token"] = token
     app.router.add_get("/", index)
     app.router.add_get("/fonts/{name}", font_file)
@@ -329,4 +498,6 @@ def build_web(token: str) -> web.Application:
     app.router.add_put("/api/templates/{tid:\\d+}", api_tpl_update)
     app.router.add_delete("/api/templates/{tid:\\d+}", api_tpl_delete)
     app.router.add_post("/api/preview", api_preview)
+    app.router.add_post("/api/import", api_import)
+    app.router.add_post("/api/import/figma", api_import_figma)
     return app

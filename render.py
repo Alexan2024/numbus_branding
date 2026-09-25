@@ -239,12 +239,22 @@ def shift_tone(r, g, b, pct):
 class Ctx:
     """Всё, что нужно слоям: палитра, логотипы, свои шрифты, значения полей."""
 
-    def __init__(self, palette=None, logos=None, customs=None, fields=None, dark=0.0):
+    def __init__(self, palette=None, logos=None, customs=None, fields=None, dark=0.0, images=None):
         self.palette = palette or []
         self.logos = logos or {}          # {"logo": RGBA Image, "logo_alt": ...}
         self.customs = customs or {}      # {"font1": bytes, ...}
         self.fields = fields or {}        # title, subtitle, hashtag, i, n
         self.dark = float(dark)
+        self.images = images              # callable(asset_id) -> RGBA Image | None (графика из макетов)
+
+    def image(self, asset):
+        if not self.images:
+            return None
+        try:
+            return self.images(asset)
+        except Exception as e:
+            logger.warning("картинка %s: %s", asset, e)
+            return None
 
     def ref(self, v, default="#FFFFFF"):
         v = v or default
@@ -495,8 +505,34 @@ def draw_overlay_layer(canvas, L, ctx):
     return (0, 0, W, H)
 
 
+def draw_image_layer(canvas, L, ctx):
+    """Графика из макета. fit: box — свой размер и якорь; cover — заполнить кадр
+    с обрезкой; stretch — растянуть точно по кадру (рамки, обводки)."""
+    W, H = canvas.size
+    img = ctx.image(L.get("asset"))
+    if img is None:
+        return None
+    fit = L.get("fit", "box")
+    if fit == "stretch":
+        piece, left, top = img.resize((W, H), Image.LANCZOS), 0, 0
+    elif fit == "cover":
+        piece, left, top = fit_cover(img, W, H), 0, 0
+    else:
+        w = max(1, int(round(float(L.get("w", 0.2)) * W)))
+        h = max(1, int(round(w * img.height / img.width)))
+        left, top = place(L.get("anchor", "mc"), float(L.get("x", 0)), float(L.get("y", 0)), w, h, W, H)
+        left, top = int(round(left)), int(round(top))
+        piece = img.resize((w, h), Image.LANCZOS)
+    opacity = float(L.get("opacity", 1))
+    if opacity < 1:
+        piece = piece.copy()
+        piece.putalpha(piece.split()[3].point(lambda p: int(round(p * opacity))))
+    over(canvas, piece, left, top)
+    return (left, top, piece.width, piece.height)
+
+
 DRAW = {"text": draw_text_layer, "logo": draw_logo_layer, "rect": draw_rect_layer,
-        "gradient": draw_gradient_layer, "overlay": draw_overlay_layer}
+        "gradient": draw_gradient_layer, "overlay": draw_overlay_layer, "image": draw_image_layer}
 
 
 def render_surface(photo, W, H, layers, ctx) -> Image.Image:

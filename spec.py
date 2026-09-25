@@ -13,6 +13,7 @@ MAX_LAYERS = 30
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _PAL = re.compile(r"^p[0-4]$")
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
+_IMG = re.compile(r"^img_[0-9a-f]{12}$")
 
 
 def _num(v, lo, hi, d):
@@ -117,6 +118,14 @@ def sanitize_layer(L):
         out["color"] = _color(L.get("color"), d={"mode": "fixed", "value": "p1"})
         out["opacity"] = _num(L.get("opacity"), 0, 1, 0.7)
         out["adaptive"] = bool(L.get("adaptive"))
+    elif t == "image":
+        if not isinstance(L.get("asset"), str) or not _IMG.match(L["asset"]):
+            return None
+        out["asset"] = L["asset"]
+        out["fit"] = L.get("fit") if L.get("fit") in ("box", "cover", "stretch") else "box"
+        _pos(L, out, "mc")
+        out["w"] = _num(L.get("w"), 0.005, 2, 0.2)
+        out["opacity"] = _num(L.get("opacity"), 0, 1, 1)
     elif t == "overlay":
         out["color"] = _color(L.get("color"), d={"mode": "fixed", "value": "p1"})
         out["opacity"] = _num(L.get("opacity"), 0, 1, 0.25)

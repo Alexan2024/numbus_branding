@@ -8,7 +8,6 @@ T = {
     # ---------- Общие кнопки ----------
     "b_back":     {"ru": "⬅️ Назад", "en": "⬅️ Back"},
     "b_menu":     {"ru": "⬅️ В меню", "en": "⬅️ Menu"},
-    "b_done_ph":  {"ru": "✅ Готово — дальше", "en": "✅ Done — continue"},
 
     # ---------- Старт и доступ ----------
     "welcome_new": {
@@ -44,7 +43,6 @@ T = {
                      "en": "⚠️ Your plan expired on {until}. Contact {support} to renew."},
     "menu_no_kit": {"ru": "Бренд-кит ещё не собран — начните с него.",
                     "en": "Your brand kit isn't set up yet — start there."},
-    "b_new":      {"ru": "✨ Новый пост", "en": "✨ New post"},
     "b_team":     {"ru": "👥 Команда", "en": "👥 Team"},
     "b_switch":   {"ru": "🔁 Сменить бренд", "en": "🔁 Switch brand"},
     "b_code":     {"ru": "➕ Ввести код", "en": "➕ Enter code"},
@@ -72,6 +70,26 @@ T = {
     "logo_photo": {"ru": "⚠️ Пришло как фото — Telegram сжал его и убрал прозрачность. Для лучшего качества пришлите файлом.",
                    "en": "⚠️ Sent as a photo — Telegram compressed it and dropped transparency. Send it as a file for best quality."},
 
+    # ---------- Быстрый пост ----------
+    "menu_hint":  {"ru": "📸 Чтобы сделать пост, пришлите фото — сразу покажу превью. "
+                         "Первая строка подписи станет заголовком, #слово — хештегом.",
+                   "en": "📸 To make a post, send photos — I'll show a preview right away. "
+                         "The first line of the caption becomes the headline, a #word the hashtag."},
+    "q_hint":     {"ru": "Чтобы сделать пост, пришлите фото. Подпись станет заголовком.",
+                   "en": "To make a post, send photos. The caption becomes the headline."},
+    "q_photos":   {"ru": "Фото: {n}", "en": "Photos: {n}"},
+    "q_no_tag":   {"ru": "без хештега", "en": "no hashtag"},
+    "q_no_title": {"ru": "Заголовка нет — нажмите «Текст» или пришлите фото с подписью.",
+                   "en": "No headline — tap “Text” or send photos with a caption."},
+    "b_q_text":   {"ru": "✏️ Текст", "en": "✏️ Text"},
+    "b_q_send":   {"ru": "✅ Файлы ({n})", "en": "✅ Files ({n})"},
+    "q_ask_text": {"ru": "✍️ Пришлите текст. Первая строка — заголовок, после пустой строки — подзаголовок, "
+                         "#слово — хештег.",
+                   "en": "✍️ Send the text. First line is the headline, after a blank line the subheadline, "
+                         "a #word the hashtag."},
+    "q_sending":  {"ru": "Готовлю файлы…", "en": "Preparing files…"},
+    "no_access_short": {"ru": "Доступ закончился", "en": "Access has expired"},
+
     # ---------- Редактор (Mini App) ----------
     "k_setup":    {"ru": "🎨 Собрать бренд", "en": "🎨 Set up brand"},
     "b_editor":   {"ru": "🎨 Редактор стиля", "en": "🎨 Style editor"},
@@ -83,11 +101,8 @@ T = {
                          "already there — change them freely or start from scratch."},
     "editor_off": {"ru": "Редактор пока не подключён — администратор должен задать WEBAPP_URL.",
                    "en": "The editor isn't connected yet — the admin needs to set WEBAPP_URL."},
-    "ask_tpl":    {"ru": "Выберите шаблон:", "en": "Choose a template:"},
     "no_tpl":     {"ru": "Шаблонов пока нет — соберите стиль в редакторе.",
                    "en": "No templates yet — build your style in the editor."},
-    "ask_subtitle": {"ru": "✍️ Пришлите <b>подзаголовок</b>.", "en": "✍️ Send the <b>subheadline</b>."},
-    "b_skip_field": {"ru": "Без подзаголовка", "en": "No subheadline"},
     "tpl_story":  {"ru": " + сторис", "en": " + stories"},
 
     "kit_owner_only": {"ru": "Бренд-кит может менять только владелец бренда.",
@@ -110,40 +125,21 @@ T = {
                   "en": "Upload a logo in your brand kit first."},
     "limit_hit": {"ru": "В этом месяце осталось {left} фото по тарифу, а в пакете {n}. Уберите лишние или напишите {support}.",
                   "en": "Your plan has {left} photos left this month, but the batch has {n}. Remove some or contact {support}."},
-    "ask_photos": {"ru": "📎 Присылайте фото <b>файлами</b> (скрепка → Файл), чтобы не терять качество. "
-                         "Можно несколько сразу. Потом нажмите «Готово».",
-                   "en": "📎 Send photos <b>as files</b> (paperclip → File) to keep full quality. "
-                         "Several at once is fine. Then tap “Done”."},
-    "photos_n":  {"ru": "✅ Фото: {n}", "en": "✅ Photos: {n}"},
     "photos_max": {"ru": "Максимум {n} фото за раз — остальные не взял.",
                    "en": "Max {n} photos per batch — I skipped the rest."},
-    "photos_none": {"ru": "Сначала пришлите хотя бы одно фото.",
-                    "en": "Send at least one photo first."},
     "file_big":  {"ru": "Файл больше 20 МБ — это лимит Telegram для ботов. Пришлите файл поменьше.",
                   "en": "The file is over 20 MB — Telegram's limit for bots. Send a smaller file."},
     "photo_bad": {"ru": "Не смог открыть этот файл как изображение.",
                   "en": "Couldn't open this file as an image."},
-    "ask_title":  {"ru": "✍️ Пришлите <b>заголовок</b>. Переносы строк можно ставить самостоятельно, "
-                         "слишком длинные строки перенесутся сами.",
-                   "en": "✍️ Send the <b>headline</b>. You can add line breaks yourself; "
-                         "long lines wrap automatically."},
-    "title_bad": {"ru": "Заголовок пустой — пришлите текст.", "en": "The headline is empty — send some text."},
-    "ask_format": {"ru": "📐 Формат ({n} фото):", "en": "📐 Format ({n} photos):"},
     "fmt_orig":  {"ru": "Как в оригинале", "en": "Original ratio"},
-    "ask_tag":   {"ru": "Хештег:", "en": "Hashtag:"},
     "tag_none":  {"ru": "— Без хештега —", "en": "— No hashtag —"},
     "tag_custom": {"ru": "✏️ Свой хештег", "en": "✏️ Custom hashtag"},
     "ask_custom_tag": {"ru": "Пришлите хештег одним словом — решётку добавлю сам.",
                        "en": "Send a one-word hashtag — I'll add the # myself."},
     "custom_tag_bad": {"ru": "Пустой хештег — пришлите ещё раз.", "en": "Empty hashtag — try again."},
-    "working":   {"ru": "⚙️ Обрабатываю {n} фото…", "en": "⚙️ Processing {n} photos…"},
     "photo_err": {"ru": "❌ Фото {i}: не получилось обработать.", "en": "❌ Photo {i}: processing failed."},
-    "done":      {"ru": "✅ Готово: {ok} из {n}.", "en": "✅ Done: {ok} of {n}."},
-    "dark_cap":  {"ru": "🎚 <b>Затемнение</b> — подберите под кадр. Превью на первом фото.\n\nУровень: {meter}",
-                  "en": "🎚 <b>Darkening</b> — tune it to the shot. Preview uses the first photo.\n\nLevel: {meter}"},
     "b_lighter": {"ru": "☀️ Светлее", "en": "☀️ Lighter"},
     "b_darker":  {"ru": "🌑 Темнее", "en": "🌑 Darker"},
-    "b_render":  {"ru": "✅ Сгенерировать", "en": "✅ Generate"},
     "edge":      {"ru": "Дальше некуда 🙂", "en": "That's the limit 🙂"},
     "stale":     {"ru": "Сессия устарела — откройте меню: /start", "en": "Session expired — open the menu: /start"},
     "cancelled": {"ru": "Отменено.", "en": "Cancelled."},

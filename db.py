@@ -105,6 +105,12 @@ CREATE TABLE IF NOT EXISTS templates (
     updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_templates_brand ON templates (brand_id, sort);
+CREATE TABLE IF NOT EXISTS prefs (
+    tg_id INTEGER NOT NULL,
+    brand_id INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (tg_id, brand_id)
+);
 """
 
 
@@ -397,3 +403,42 @@ def update_template(brand_id: int, tid: int, name: str, spec: dict) -> bool:
 def delete_template(brand_id: int, tid: int) -> bool:
     with _conn() as c:
         return c.execute("DELETE FROM templates WHERE id=? AND brand_id=?", (tid, brand_id)).rowcount == 1
+
+
+# ============ Последние настройки поста (для быстрого режима) ============
+def get_prefs(tg_id: int, brand_id: int) -> dict:
+    with _conn() as c:
+        r = c.execute("SELECT data FROM prefs WHERE tg_id=? AND brand_id=?", (tg_id, brand_id)).fetchone()
+    try:
+        return json.loads(r["data"]) if r else {}
+    except Exception:
+        return {}
+
+
+def set_prefs(tg_id: int, brand_id: int, **changes):
+    data = get_prefs(tg_id, brand_id)
+    data.update(changes)
+    with _conn() as c:
+        c.execute("INSERT OR REPLACE INTO prefs (tg_id, brand_id, data) VALUES (?,?,?)",
+                  (tg_id, brand_id, json.dumps(data, ensure_ascii=False)))
+
+
+# ============ Графика из импортированных макетов ============
+def image_assets(brand_id: int) -> list:
+    with _conn() as c:
+        return [r["kind"] for r in c.execute(
+            "SELECT kind FROM assets WHERE brand_id=? AND kind LIKE 'img\\_%' ESCAPE '\\'", (brand_id,))]
+
+
+def gc_images(brand_id: int) -> int:
+    """Удаляет картинки, на которые не ссылается ни один шаблон бренда."""
+    used = set()
+    for t in list_templates(brand_id):
+        for surf in ("feed", "story"):
+            for L in t["spec"].get(surf, {}).get("layers", []):
+                if L.get("type") == "image":
+                    used.add(L.get("asset"))
+    dead = [k for k in image_assets(brand_id) if k not in used]
+    for k in dead:
+        del_asset(brand_id, k)
+    return len(dead)

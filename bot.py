@@ -8,6 +8,7 @@ import io
 import os
 import re
 import html
+import time
 import signal
 import asyncio
 import logging
@@ -48,8 +49,7 @@ RENDER_SEM = asyncio.Semaphore(int(os.environ.get("RENDER_WORKERS", "2")))
 HTML = ParseMode.HTML
 esc = html.escape
 
-(MENU, CODE, K_NAME, K_LOGO, P_TPL, P_PHOTOS, P_TITLE, P_SUBTITLE,
- P_FORMAT, P_TAG, P_CUSTOM_TAG, P_DARK) = range(12)
+MENU, CODE, K_NAME, K_LOGO = range(4)
 
 FORMATS = ["4:5", "3:4", "1:1", "3:2", "9:16", "orig"]
 CODE_RE = r"(?i)^\s*NB-[A-Z0-9]{4}-[A-Z0-9]{4}\s*$"
@@ -91,7 +91,7 @@ def tx(ctx, key, **kw):
 
 
 def reset_session(ctx):
-    for k in ("post", "wiz", "kit_bid", "status_msg"):
+    for k in ("wiz", "kit_bid", "await"):
         ctx.user_data.pop(k, None)
 
 
@@ -218,11 +218,13 @@ def menu_text(ctx, b):
         lines.append(tx(ctx, "menu_expired", until=until, support=esc(SUPPORT)))
     if not db.has_asset(b["id"], "logo"):
         lines.append("\n" + tx(ctx, "menu_no_kit"))
+    else:
+        lines.append("\n" + tx(ctx, "menu_hint"))
     return "\n".join(lines)
 
 
 def menu_kb(ctx, b, brands):
-    rows = [[Btn(tx(ctx, "b_new"), callback_data="menu:new")]]
+    rows = []
     if b["role"] == "owner":
         eb = editor_btn(ctx, b["id"])
         if eb and db.has_asset(b["id"], "logo"):
@@ -304,8 +306,9 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await ask_name(update, ctx)
     if action == "team":
         return await show_team(update, ctx, b, edit=True)
-    if action == "new":
-        return await start_post(update, ctx, b)
+    if action == "new":   # кнопка из старых сообщений
+        await say(update, tx(ctx, "q_hint"))
+        return MENU
     return await show_menu(update, ctx, edit=True)
 
 
@@ -434,253 +437,48 @@ async def on_logo(update, ctx):
     return await show_menu(update, ctx)
 
 
-# ============ Создание поста ============
-def post(ctx):
-    return ctx.user_data.setdefault("post", {})
+# ============ Быстрый пост: фото → превью с пультом ============
+# Человек присылает фото (одно или альбомом) с подписью. Бот сразу отвечает
+# превью по последнему шаблону и формату этого человека; под превью — пульт.
+# Любая правка перерисовывает превью на месте. «Файлы» отдают готовые JPG,
+# а пульт появляется заново под ними — можно сделать ещё вариант.
+DRAFT_TTL = 180          # сек: фото без подписи в этот срок дополняют текущий пост
+REFRESH_DELAY = 1.2      # сек: ждём остальные фото альбома
+TAG_RE = re.compile(r"#[\w\-]+", re.U)
 
 
-async def start_post(update, ctx, b):
-    if not db.plan_active(b):
-        await say(update, tx(ctx, "no_access", support=esc(SUPPORT)))
-        return MENU
-    if not db.has_asset(b["id"], "logo"):
-        await say(update, tx(ctx, "no_logo"))
-        return MENU
-    ctx.user_data["post"] = {"bid": b["id"], "photos": []}
-    return await ask_tpl(update, ctx)
-
-
-async def ask_tpl(update, ctx):
-    p = post(ctx)
-    tpls = db.list_templates(p["bid"])
-    if not tpls:
-        b = db.get_brand(p["bid"])
-        eb = editor_btn(ctx, b["id"])
-        rows = ([[eb]] if eb else []) + [[Btn(tx(ctx, "b_menu"), callback_data="menu:home")]]
-        await edit_or_say(update, tx(ctx, "no_tpl"), KB(rows))
-        return MENU
-    rows = [[Btn(tp["name"] + (tx(ctx, "tpl_story") if tp["spec"]["story"].get("enabled") else ""),
-                 callback_data=f"tp:{tp['id']}")] for tp in tpls]
-    rows.append([Btn(tx(ctx, "b_menu"), callback_data="menu:home")])
-    await edit_or_say(update, tx(ctx, "ask_tpl"), KB(rows))
-    return P_TPL
-
-
-async def on_tpl(update, ctx):
-    await answer(update)
-    p = post(ctx)
-    tp = db.get_template(p["bid"], int(update.callback_query.data.split(":")[1]))
-    if not tp:
-        return await ask_tpl(update, ctx)
-    p.update(tid=tp["id"], spec=tp["spec"], tname=tp["name"], fields=R.spec_fields(tp["spec"]))
-    return await ask_photos(update, ctx)
-
-
-async def ask_photos(update, ctx):
-    n = len(post(ctx).get("photos", []))
-    text = tx(ctx, "ask_photos") + (f"\n\n{tx(ctx, 'photos_n', n=n)}" if n else "")
-    rows = []
-    if n:
-        rows.append([Btn(tx(ctx, "b_done_ph"), callback_data="p:done")])
-    rows.append([Btn(tx(ctx, "b_back"), callback_data="p:back")])
-    await edit_or_say(update, text, KB(rows))
-    return P_PHOTOS
-
-
-async def on_photo(update, ctx):
-    p = post(ctx)
-    photos = p.setdefault("photos", [])
-    if len(photos) >= MAX_BATCH:
-        if not p.get("warned_max"):
-            p["warned_max"] = True
-            await say(update, tx(ctx, "photos_max", n=MAX_BATCH))
-        return P_PHOTOS
-    data, _ = await get_file_bytes(update, ctx)
-    if not data:
-        return P_PHOTOS
-    if not is_image(data):
-        await say(update, tx(ctx, "photo_bad"))
-        return P_PHOTOS
-    photos.append(data)
-    prev = ctx.user_data.pop("status_msg", None)
-    m = await say(update, tx(ctx, "photos_n", n=len(photos)),
-                  KB([[Btn(tx(ctx, "b_done_ph"), callback_data="p:done")]]))
-    ctx.user_data["status_msg"] = m.message_id
-    if prev:
-        try:
-            await ctx.bot.delete_message(update.effective_chat.id, prev)
-        except TelegramError:
-            pass
-    return P_PHOTOS
-
-
-async def on_photos_done(update, ctx):
-    p = post(ctx)
-    photos = p.get("photos", [])
-    if not photos:
-        if update.callback_query:
-            await update.callback_query.answer(tx(ctx, "photos_none"), show_alert=True)
+def parse_text(text, fields):
+    """Подпись → (заголовок, подзаголовок, хештег|None).
+    Пустая строка отделяет подзаголовок. Если в шаблоне есть подзаголовок,
+    а пустой строки нет — первая строка заголовок, остальное подзаголовок."""
+    text = text or ""
+    tags = TAG_RE.findall(text)
+    body = TAG_RE.sub("", text)
+    body = "\n".join(ln.strip() for ln in body.split("\n")).strip()
+    title = subtitle = ""
+    if body:
+        paras = re.split(r"\n\s*\n", body, maxsplit=1)
+        if len(paras) == 2:
+            title, subtitle = paras[0].strip(), paras[1].strip()
+        elif "subtitle" in fields and "\n" in body:
+            title, subtitle = body.split("\n", 1)
         else:
-            await say(update, tx(ctx, "photos_none"))
-        return P_PHOTOS
-    await answer(update)
-    b = db.get_brand(p["bid"])
-    left = plan_limits(b)["photos"] - db.photos_used(b["id"])
-    if len(photos) > left:
-        await say(update, tx(ctx, "limit_hit", left=max(0, left), n=len(photos), support=esc(SUPPORT)))
-        return P_PHOTOS
-    ctx.user_data.pop("status_msg", None)
-    await strip_kb(update)
-    return await next_field(update, ctx, after=P_PHOTOS)
+            title = body
+    return title.strip()[:300], subtitle.strip()[:300], (tags[0][:31] if tags else None)
 
 
-async def next_field(update, ctx, after):
-    """Шаги после фото зависят от шаблона: какие поля он использует."""
-    p = post(ctx)
-    order = [(P_TITLE, "title"), (P_SUBTITLE, "subtitle")]
-    for state, field in order:
-        if state > after and field in p["fields"]:
-            if state == P_TITLE:
-                await say(update, tx(ctx, "ask_title"), KB([[Btn(tx(ctx, "b_back"), callback_data="p:back")]]))
-            else:
-                await say(update, tx(ctx, "ask_subtitle"),
-                          KB([[Btn(tx(ctx, "b_skip_field"), callback_data="p:skipsub")],
-                              [Btn(tx(ctx, "b_back"), callback_data="p:back")]]))
-            return state
-    return await ask_format(update, ctx)
+def draft(ctx):
+    return ctx.user_data.get("q")
 
 
-async def on_title(update, ctx):
-    title = (update.message.text or "").strip("\n")
-    if not title.strip():
-        await say(update, tx(ctx, "title_bad"))
-        return P_TITLE
-    post(ctx)["title"] = title[:300]
-    return await next_field(update, ctx, after=P_TITLE)
+def _tpl(d):
+    return db.get_template(d["bid"], d["tid"])
 
 
-async def on_subtitle(update, ctx):
-    post(ctx)["subtitle"] = (update.message.text or "").strip()[:300]
-    return await ask_format(update, ctx)
-
-
-async def on_skip_subtitle(update, ctx):
-    await answer(update)
-    await strip_kb(update)
-    post(ctx)["subtitle"] = ""
-    return await ask_format(update, ctx)
-
-
-async def ask_format(update, ctx):
-    p = post(ctx)
-    keys = [k for k in FORMATS if not (k == "9:16" and p["spec"]["story"].get("enabled"))]
-    main = [k for k in keys if k != "orig"]
-    rows = [[Btn(k, callback_data=f"fmt:{k}") for k in main[i:i + 3]] for i in range(0, len(main), 3)]
-    rows.append([Btn(tx(ctx, "fmt_orig"), callback_data="fmt:orig")])
-    rows.append([Btn(tx(ctx, "b_back"), callback_data="p:back")])
-    await edit_or_say(update, tx(ctx, "ask_format", n=len(p["photos"])), KB(rows))
-    return P_FORMAT
-
-
-async def on_format(update, ctx):
-    await answer(update)
-    p = post(ctx)
-    p["fmt"] = update.callback_query.data.split(":", 1)[1]
-    if "hashtag" in p["fields"]:
-        return await ask_tag(update, ctx)
-    await strip_kb(update)
-    return await proceed(update, ctx, "")
-
-
-def tag_kb(ctx):
-    tags = db.get_brand(post(ctx)["bid"])["kit"].get("hashtags") or []
-    rows, row = [], []
-    for i, tag in enumerate(tags):
-        row.append(Btn(tag, callback_data=f"tag:i:{i}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([Btn(tx(ctx, "tag_none"), callback_data="tag:none")])
-    rows.append([Btn(tx(ctx, "tag_custom"), callback_data="tag:custom")])
-    rows.append([Btn(tx(ctx, "b_back"), callback_data="p:back")])
-    return KB(rows)
-
-
-async def ask_tag(update, ctx):
-    await edit_or_say(update, tx(ctx, "ask_tag"), tag_kb(ctx))
-    return P_TAG
-
-
-async def on_tag(update, ctx):
-    await answer(update)
-    parts = update.callback_query.data.split(":")
-    if parts[1] == "custom":
-        await edit_or_say(update, tx(ctx, "ask_custom_tag"), KB([[Btn(tx(ctx, "b_back"), callback_data="p:back")]]))
-        return P_CUSTOM_TAG
-    tag = ""
-    if parts[1] == "i":
-        tags = db.get_brand(post(ctx)["bid"])["kit"].get("hashtags") or []
-        idx = int(parts[2])
-        tag = tags[idx] if idx < len(tags) else ""
-    await strip_kb(update)
-    return await proceed(update, ctx, tag)
-
-
-async def on_custom_tag(update, ctx):
-    words = (update.message.text or "").split()
-    token = words[0].lstrip("#").strip() if words else ""
-    if not token:
-        await say(update, tx(ctx, "custom_tag_bad"))
-        return P_CUSTOM_TAG
-    return await proceed(update, ctx, "#" + token[:30])
-
-
-def back_for(state):
-    async def handler(update, ctx):
-        await answer(update)
-        p = post(ctx)
-        if state == P_TPL or not p.get("tid"):
-            return await show_menu(update, ctx, edit=True)
-        if state == P_PHOTOS:
-            return await ask_tpl(update, ctx)
-        if state == P_TITLE:
-            await strip_kb(update)
-            return await ask_photos(update, ctx)
-        if state == P_SUBTITLE:
-            await strip_kb(update)
-            if "title" in p["fields"]:
-                return await next_field(update, ctx, after=P_PHOTOS)
-            return await ask_photos(update, ctx)
-        if state == P_FORMAT:
-            await strip_kb(update)
-            if "subtitle" in p["fields"]:
-                return await next_field(update, ctx, after=P_TITLE)
-            if "title" in p["fields"]:
-                return await next_field(update, ctx, after=P_PHOTOS)
-            return await ask_photos(update, ctx)
-        if state == P_TAG:
-            return await ask_format(update, ctx)
-        if state == P_CUSTOM_TAG:
-            return await ask_tag(update, ctx)
-        if state == P_DARK:
-            try:
-                await update.callback_query.message.delete()
-            except TelegramError:
-                pass
-            if "hashtag" in p["fields"]:
-                await say(update, tx(ctx, "ask_tag"), tag_kb(ctx))
-                return P_TAG
-            return await ask_format(update, ctx)
-        return await show_menu(update, ctx, edit=True)
-    return handler
-
-
-def _ctx_for(base, p, i, n, dark):
+def _ctx_for(base, d, i, n, dark):
     return R.Ctx(base.palette, base.logos, base.customs,
-                 dict(title=p.get("title", ""), subtitle=p.get("subtitle", ""), hashtag=p.get("tag", ""), i=i, n=n),
-                 dark)
+                 dict(title=d.get("title", ""), subtitle=d.get("subtitle", ""), hashtag=d.get("tag") or "",
+                      i=i, n=n), dark, base.images)
 
 
 def _render_job(data, spec, fmt, ctx):
@@ -693,84 +491,312 @@ def _preview_job(data, spec, fmt, ctx):
     return R.to_preview(R.render_surface(photo, W, H, spec["feed"]["layers"], ctx))
 
 
-async def proceed(update, ctx, tag):
-    p = post(ctx)
-    p["tag"] = tag
-    p["base"] = await run(web.brand_ctx, p["bid"])
-    if R.spec_has_shade(p["spec"]):
-        p["dark"] = R.DARK_DEFAULT_IDX
-        return await show_dark(update, ctx, fresh=True)
-    return await render_batch(update, ctx, 0.0)
+def fmt_label(ctx, fmt):
+    return tx(ctx, "fmt_orig") if fmt == "orig" else fmt
 
 
-def dark_meter(idx):
-    return "●" * (idx + 1) + "○" * (len(R.DARK_STEPS) - idx - 1)
+def pult_caption(ctx, d, tp):
+    fields = R.spec_fields(tp["spec"])
+    bits = [f"<b>{esc(tp['name'])}</b>", fmt_label(ctx, d["fmt"])]
+    if "hashtag" in fields:
+        bits.append(esc(d.get("tag") or tx(ctx, "q_no_tag")))
+    lines = [" · ".join(bits), tx(ctx, "q_photos", n=len(d["photos"]))
+             + (tx(ctx, "tpl_story") if tp["spec"]["story"].get("enabled") else "")]
+    if "title" in fields and not d.get("title"):
+        lines.append(tx(ctx, "q_no_title"))
+    return "\n".join(lines)
 
 
-def dark_kb(ctx, idx):
-    last = len(R.DARK_STEPS) - 1
-    return KB([
-        [Btn(tx(ctx, "b_lighter") if idx > 0 else "· · ·", callback_data="dk:down" if idx > 0 else "dk:noop"),
-         Btn(tx(ctx, "b_darker") if idx < last else "· · ·", callback_data="dk:up" if idx < last else "dk:noop")],
-        [Btn(tx(ctx, "b_render"), callback_data="dk:ok")],
-        [Btn(tx(ctx, "b_back"), callback_data="p:back")],
-    ])
+def pult_kb(ctx, d, tp):
+    fields = R.spec_fields(tp["spec"])
+    name = tp["name"] if len(tp["name"]) <= 14 else tp["name"][:13] + "…"
+    row = [Btn("🧩 " + name, callback_data="q:tpl"), Btn("📐 " + fmt_label(ctx, d["fmt"]), callback_data="q:fmt")]
+    if "hashtag" in fields:
+        row.append(Btn(d.get("tag") or "#", callback_data="q:tag"))
+    rows = [row]
+    if R.spec_has_shade(tp["spec"]):
+        last = len(R.DARK_STEPS) - 1
+        rows.append([Btn(tx(ctx, "b_lighter") if d["dark"] > 0 else "· · ·", callback_data="q:lighter"),
+                     Btn(tx(ctx, "b_darker") if d["dark"] < last else "· · ·", callback_data="q:darker")])
+    rows.append([Btn(tx(ctx, "b_q_text"), callback_data="q:text")])
+    rows.append([Btn(tx(ctx, "b_q_send", n=len(d["photos"])), callback_data="q:send")])
+    return KB(rows)
 
 
-async def show_dark(update, ctx, fresh=False):
-    p = post(ctx)
-    idx = p["dark"]
-    c = _ctx_for(p["base"], p, 1, len(p["photos"]), R.DARK_STEPS[idx])
-    data = await run(_preview_job, p["photos"][0], p["spec"], p["fmt"], c)
-    caption = tx(ctx, "dark_cap", meter=dark_meter(idx))
-    if fresh:
-        await update.effective_chat.send_photo(io.BytesIO(data), caption=caption, parse_mode=HTML,
-                                               reply_markup=dark_kb(ctx, idx))
-    else:
-        await put_photo(update, data, caption, dark_kb(ctx, idx))
-    return P_DARK
-
-
-async def on_dark(update, ctx):
-    q = update.callback_query
-    action = q.data.split(":")[1]
-    p = post(ctx)
-    if action == "noop":
-        await answer(update)
-        return P_DARK
-    if action in ("up", "down"):
-        new = max(0, min(len(R.DARK_STEPS) - 1, p["dark"] + (1 if action == "up" else -1)))
-        if new == p["dark"]:
-            await q.answer(tx(ctx, "edge"))
-            return P_DARK
-        await answer(update)
-        p["dark"] = new
-        return await show_dark(update, ctx)
-    await answer(update)
-    await strip_kb(update)
-    return await render_batch(update, ctx, R.DARK_STEPS[p["dark"]])
-
-
-async def render_batch(update, ctx, dark):
-    p = post(ctx)
-    photos, bid, n = p["photos"], p["bid"], len(p["photos"])
-    await say(update, tx(ctx, "working", n=n))
-    base = safe_name(db.get_brand(bid)["kit"].get("name")) + "_" + safe_name(p.get("tname"))
-    ok = 0
-    for i, data in enumerate(photos, 1):
+async def show_pult(bot, chat_id, ctx, new=False):
+    """Рисует превью первого фото и показывает/обновляет пульт."""
+    d = draft(ctx)
+    if not d or not d["photos"]:
+        return
+    tp = _tpl(d)
+    if not tp:
+        tpls = db.list_templates(d["bid"])
+        if not tpls:
+            return
+        tp = tpls[0]
+        d["tid"] = tp["id"]
+    d["base"] = d.get("base") or await run(web.brand_ctx, d["bid"])
+    c = _ctx_for(d["base"], d, 1, len(d["photos"]), R.DARK_STEPS[d["dark"]])
+    data = await run(_preview_job, d["photos"][0], tp["spec"], d["fmt"], c)
+    caption, kb = pult_caption(ctx, d, tp), pult_kb(ctx, d, tp)
+    if d.get("msg") and not new:
         try:
-            outs = await run(_render_job, data, p["spec"], p["fmt"], _ctx_for(p["base"], p, i, n, dark))
+            await bot.edit_message_media(chat_id=chat_id, message_id=d["msg"],
+                                         media=InputMediaPhoto(io.BytesIO(data), caption=caption, parse_mode=HTML),
+                                         reply_markup=kb)
+            return
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                return
+            logger.info("pult edit failed, sending new: %s", e)
+    if d.get("msg") and new:
+        try:
+            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=d["msg"], reply_markup=None)
+        except TelegramError:
+            pass
+    m = await bot.send_photo(chat_id, io.BytesIO(data), caption=caption, parse_mode=HTML, reply_markup=kb)
+    d["msg"] = m.message_id
+
+
+def schedule_pult(update, ctx):
+    old = ctx.user_data.get("q_task")
+    if old and not old.done():
+        old.cancel()
+    bot, chat_id = ctx.bot, update.effective_chat.id
+
+    async def later():
+        try:
+            await asyncio.sleep(REFRESH_DELAY)
+            await show_pult(bot, chat_id, ctx)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception("pult: %s", e)
+    ctx.user_data["q_task"] = asyncio.create_task(later())
+
+
+async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    L(ctx, update)
+    uid = update.effective_user.id
+    b, _ = current_brand(uid)
+    if not b:
+        await say(update, tx(ctx, "welcome_new"))
+        return
+    if not db.plan_active(b):
+        await say(update, tx(ctx, "no_access", support=esc(SUPPORT)))
+        return
+    if not db.has_asset(b["id"], "logo"):
+        await say(update, tx(ctx, "no_logo"))
+        return
+    tpls = db.list_templates(b["id"])
+    if not tpls:
+        eb = editor_btn(ctx, b["id"])
+        await say(update, tx(ctx, "no_tpl"), KB([[eb]]) if eb else None)
+        return
+    data, _ = await get_file_bytes(update, ctx)
+    if not data:
+        return
+    if not is_image(data):
+        await say(update, tx(ctx, "photo_bad"))
+        return
+    msg = update.message
+    gid, cap = msg.media_group_id, msg.caption
+    d = draft(ctx)
+    now = time.time()
+    same_album = d and gid and d.get("group") == gid
+    add_more = (d and not gid and not cap and not d.get("sent") and d["bid"] == b["id"]
+                and now - d["ts"] < DRAFT_TTL)
+    if (same_album or add_more) and d["bid"] == b["id"]:
+        if len(d["photos"]) >= MAX_BATCH:
+            if not d.get("warned_max"):
+                d["warned_max"] = True
+                await say(update, tx(ctx, "photos_max", n=MAX_BATCH))
+            return
+        d["photos"].append(data)
+        d["ts"] = now
+        if cap:
+            fields = R.spec_fields(_tpl(d)["spec"]) if _tpl(d) else set()
+            d["title"], d["subtitle"], tag = parse_text(cap, fields)
+            d["tag"] = tag or d.get("tag")
+    else:
+        prefs = db.get_prefs(uid, b["id"])
+        tp = next((x for x in tpls if x["id"] == prefs.get("tid")), tpls[0])
+        fmt = prefs.get("fmt") if prefs.get("fmt") in FORMATS else "4:5"
+        if fmt == "9:16" and tp["spec"]["story"].get("enabled"):
+            fmt = "4:5"
+        title, subtitle, tag = parse_text(cap, R.spec_fields(tp["spec"]))
+        ctx.user_data["q"] = d = {"bid": b["id"], "photos": [data], "group": gid, "ts": now, "tid": tp["id"],
+                                  "fmt": fmt, "dark": R.DARK_DEFAULT_IDX, "title": title, "subtitle": subtitle,
+                                  "tag": tag, "msg": None, "sent": False}
+        ctx.user_data.pop("await", None)
+    schedule_pult(update, ctx)
+
+
+async def edit_kb(update, kb):
+    try:
+        await update.callback_query.edit_message_reply_markup(reply_markup=kb)
+    except BadRequest:
+        pass
+
+
+async def on_quick_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    L(ctx, update)
+    q = update.callback_query
+    d = draft(ctx)
+    if not d or d.get("msg") != q.message.message_id:
+        await on_stale(update, ctx)
+        return
+    head, _, arg = q.data.partition(":")      # «qf:1:1» → формат «1:1» целиком
+    tp = _tpl(d)
+    if not tp:
+        await on_stale(update, ctx)
+        return
+    uid = update.effective_user.id
+    back = [Btn(tx(ctx, "b_back"), callback_data="q:back")]
+
+    if head == "q" and arg == "tpl":
+        await answer(update)
+        rows = [[Btn(("✓ " if x["id"] == d["tid"] else "") + x["name"]
+                     + (tx(ctx, "tpl_story") if x["spec"]["story"].get("enabled") else ""),
+                     callback_data=f"qt:{x['id']}")] for x in db.list_templates(d["bid"])]
+        await edit_kb(update, KB(rows + [back]))
+        return
+    if head == "q" and arg == "fmt":
+        await answer(update)
+        keys = [k for k in FORMATS if not (k == "9:16" and tp["spec"]["story"].get("enabled"))]
+        main = [k for k in keys if k != "orig"]
+        rows = [[Btn(("✓ " if k == d["fmt"] else "") + k, callback_data=f"qf:{k}") for k in main[i:i + 3]]
+                for i in range(0, len(main), 3)]
+        rows.append([Btn(("✓ " if d["fmt"] == "orig" else "") + tx(ctx, "fmt_orig"), callback_data="qf:orig")])
+        await edit_kb(update, KB(rows + [back]))
+        return
+    if head == "q" and arg == "tag":
+        await answer(update)
+        tags = db.get_brand(d["bid"])["kit"].get("hashtags") or []
+        rows, row = [], []
+        for i, tag in enumerate(tags):
+            row.append(Btn(("✓ " if tag == d.get("tag") else "") + tag, callback_data=f"qh:i:{i}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([Btn(tx(ctx, "tag_none"), callback_data="qh:none")])
+        rows.append([Btn(tx(ctx, "tag_custom"), callback_data="qh:custom")])
+        await edit_kb(update, KB(rows + [back]))
+        return
+    if head == "q" and arg == "back":
+        await answer(update)
+        await edit_kb(update, pult_kb(ctx, d, tp))
+        return
+    if head == "q" and arg == "text":
+        await answer(update)
+        ctx.user_data["await"] = "text"
+        await say(update, tx(ctx, "q_ask_text"))
+        return
+    if head == "q" and arg in ("lighter", "darker"):
+        new = max(0, min(len(R.DARK_STEPS) - 1, d["dark"] + (1 if arg == "darker" else -1)))
+        if new == d["dark"]:
+            await q.answer(tx(ctx, "edge"))
+            return
+        await answer(update)
+        d["dark"] = new
+        await show_pult(ctx.bot, q.message.chat_id, ctx)
+        return
+    if head == "qt":
+        await answer(update)
+        ntp = db.get_template(d["bid"], int(arg)) if arg.isdigit() else None
+        if ntp:
+            d["tid"] = ntp["id"]
+            if d["fmt"] == "9:16" and ntp["spec"]["story"].get("enabled"):
+                d["fmt"] = "4:5"
+            db.set_prefs(uid, d["bid"], tid=ntp["id"], fmt=d["fmt"])
+        await show_pult(ctx.bot, q.message.chat_id, ctx)
+        return
+    if head == "qf":
+        await answer(update)
+        if arg in FORMATS:
+            d["fmt"] = arg
+            db.set_prefs(uid, d["bid"], fmt=arg)
+        await show_pult(ctx.bot, q.message.chat_id, ctx)
+        return
+    if head == "qh":
+        await answer(update)
+        if arg == "custom":
+            ctx.user_data["await"] = "tag"
+            await say(update, tx(ctx, "ask_custom_tag"))
+            return
+        if arg == "none":
+            d["tag"] = None
+        elif arg.startswith("i:"):
+            tags = db.get_brand(d["bid"])["kit"].get("hashtags") or []
+            idx = int(arg[2:]) if arg[2:].isdigit() else -1
+            if 0 <= idx < len(tags):
+                d["tag"] = tags[idx]
+        await show_pult(ctx.bot, q.message.chat_id, ctx)
+        return
+    if head == "q" and arg == "send":
+        await send_files(update, ctx, d, tp)
+        return
+    await answer(update)
+
+
+async def send_files(update, ctx, d, tp):
+    b = db.get_brand(d["bid"])
+    n = len(d["photos"])
+    if not db.plan_active(b):
+        await update.callback_query.answer(tx(ctx, "no_access_short"), show_alert=True)
+        return
+    left = plan_limits(b)["photos"] - db.photos_used(b["id"])
+    if n > left:
+        await update.callback_query.answer()
+        await say(update, tx(ctx, "limit_hit", left=max(0, left), n=n, support=esc(SUPPORT)))
+        return
+    await update.callback_query.answer(tx(ctx, "q_sending"))
+    d["base"] = d.get("base") or await run(web.brand_ctx, d["bid"])
+    dark = R.DARK_STEPS[d["dark"]]
+    base = safe_name(b["kit"].get("name")) + "_" + safe_name(tp["name"])
+    chat = update.effective_chat
+    ok = 0
+    for i, data in enumerate(d["photos"], 1):
+        try:
+            outs = await run(_render_job, data, tp["spec"], d["fmt"], _ctx_for(d["base"], d, i, n, dark))
             for suf, blob in outs:
                 name = f"{base}_{i}.jpg" if suf == "feed" else f"{base}_{i}_story.jpg"
-                await update.effective_chat.send_document(io.BytesIO(blob), filename=name)
+                await chat.send_document(io.BytesIO(blob), filename=name)
             ok += 1
         except Exception as e:
             logger.exception("photo %s: %s", i, e)
             await say(update, tx(ctx, "photo_err", i=i))
-    db.record_event(bid, update.effective_user.id, "tpl", ok)
-    await say(update, tx(ctx, "done", ok=ok, n=n))
-    reset_session(ctx)
-    return await show_menu(update, ctx)
+    db.record_event(d["bid"], update.effective_user.id, "tpl", ok)
+    db.set_prefs(update.effective_user.id, d["bid"], tid=d["tid"], fmt=d["fmt"])
+    d["sent"] = True
+    await show_pult(ctx.bot, chat.id, ctx, new=True)   # пульт снова под файлами
+
+
+async def on_quick_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    L(ctx, update)
+    aw = ctx.user_data.pop("await", None)
+    d = draft(ctx)
+    if not aw or not d:
+        b, _ = current_brand(update.effective_user.id)
+        await say(update, tx(ctx, "q_hint") if b else tx(ctx, "welcome_new"))
+        return
+    text = update.message.text or ""
+    if aw == "tag":
+        words = text.split()
+        token = words[0].lstrip("#").strip() if words else ""
+        if not token:
+            ctx.user_data["await"] = "tag"
+            await say(update, tx(ctx, "custom_tag_bad"))
+            return
+        d["tag"] = "#" + token[:30]
+    else:
+        tp = _tpl(d)
+        d["title"], d["subtitle"], tag = parse_text(text, R.spec_fields(tp["spec"]) if tp else set())
+        if tag:
+            d["tag"] = tag
+    await show_pult(ctx.bot, update.effective_chat.id, ctx, new=True)
 
 
 # ============ Админ ============
@@ -895,25 +921,6 @@ def build_app(token=None):
             CODE: [MessageHandler(TXT, on_code)],
             K_NAME: [MessageHandler(TXT, on_name)],
             K_LOGO: [MessageHandler(IMG, on_logo)],
-            P_TPL: [CallbackQueryHandler(on_tpl, pattern=r"^tp:\d+$"),
-                    CallbackQueryHandler(back_for(P_TPL), pattern="^p:back$")],
-            P_PHOTOS: [MessageHandler(IMG, on_photo),
-                       CommandHandler("done", on_photos_done),
-                       CallbackQueryHandler(on_photos_done, pattern="^p:done$"),
-                       CallbackQueryHandler(back_for(P_PHOTOS), pattern="^p:back$")],
-            P_TITLE: [MessageHandler(TXT, on_title),
-                      CallbackQueryHandler(back_for(P_TITLE), pattern="^p:back$")],
-            P_SUBTITLE: [MessageHandler(TXT, on_subtitle),
-                         CallbackQueryHandler(on_skip_subtitle, pattern="^p:skipsub$"),
-                         CallbackQueryHandler(back_for(P_SUBTITLE), pattern="^p:back$")],
-            P_FORMAT: [CallbackQueryHandler(on_format, pattern="^fmt:"),
-                       CallbackQueryHandler(back_for(P_FORMAT), pattern="^p:back$")],
-            P_TAG: [CallbackQueryHandler(on_tag, pattern="^tag:"),
-                    CallbackQueryHandler(back_for(P_TAG), pattern="^p:back$")],
-            P_CUSTOM_TAG: [MessageHandler(TXT, on_custom_tag),
-                           CallbackQueryHandler(back_for(P_CUSTOM_TAG), pattern="^p:back$")],
-            P_DARK: [CallbackQueryHandler(on_dark, pattern="^dk:"),
-                     CallbackQueryHandler(back_for(P_DARK), pattern="^p:back$")],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel), CommandHandler("start", cmd_start)],
         allow_reentry=True,
@@ -924,6 +931,10 @@ def build_app(token=None):
     app.add_handler(CommandHandler("brands", cmd_brands))
     app.add_handler(CommandHandler("extend", cmd_extend))
     app.add_handler(conv)
+    # Быстрый пост: срабатывает, когда диалог онбординга не ждёт это сообщение
+    app.add_handler(CallbackQueryHandler(on_quick_cb, pattern=r"^q[tfh]?:"))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & IMG, on_quick_photo))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & TXT, on_quick_text))
     app.add_handler(CallbackQueryHandler(on_stale))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, on_orphan))
     app.add_error_handler(on_error)

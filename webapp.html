@@ -199,6 +199,26 @@ const TT = {
     errLimit: "Достигнут лимит шаблонов.", previewTitle: "Заголовок поста в две строки", previewSub: "Подзаголовок",
     sheetClose: "Закрыть", selectHint: "Выберите слой в списке или на картинке.", tplName: "Название шаблона",
     up: "Выше", down: "Ниже", hide: "Скрыть", show: "Показать",
+    tImage: "Графика", tImageAdd: "Картинка (PNG)", fitImg: "Размер", fitBox: "Свой", fitCover: "Заполнить", fitStretch: "Растянуть",
+    importBtn: "Импорт из макета", importTitle: "Импорт из макета", importStory: "Импортировать сторис из макета",
+    importHow: "Фото — слой «фото» или нижний слой на весь кадр. Текст, который меняется от поста к посту, — назовите слои title, subtitle, hashtag или напишите в них {title}, {subtitle}, {hashtag}. Логотип бренда — слой logo. Всё остальное перенесётся графикой.",
+    importFile: "Файл PSD, AI, PDF или PNG", importFigma: "Фрейм из Figma", figmaLink: "Ссылка на фрейм", figmaToken: "Токен Figma",
+    figmaHint: "Выделите фрейм → правый клик → Copy link to selection. Токен: Figma → Settings → Security → Personal access tokens, доступ «File content: read». Токен используется один раз и не сохраняется.",
+    importGo: "Импортировать", importing: "Разбираю макет…", importDone: "Макет перенесён",
+    repPieces: "Графика: {n}", repRoles: "Живой текст: {list}", repLogo: "Логотип бренда подставлен", repNoText: "Живого текста не нашлось — всё перенесено графикой. Отметьте слои в макете или добавьте текст здесь.",
+    repFont: "Шрифт «{f}» не найден — подставлен Inter. Загрузите файл шрифта во вкладке «Бренд» и выберите его в слое.",
+    w_group_bg: "У группы «{x}» был фон — он не перенесён: внутри неё живой текст.", w_first_artboard: "Взята первая монтажная область.",
+    w_nested: "Часть меток внутри групп — разгруппируйте их в макете.", w_render_missing: "Часть графики Figma не отрисовалась.",
+    w_text: "Текстовый слой «{x}» не прочитался — он перенесён графикой.",
+    e_png_opaque: "PNG без прозрачности. Нужна накладка: всё, кроме фото, на прозрачном фоне.", e_psd_bad: "Не удалось прочитать PSD.",
+    e_psd_render: "Не удалось отрисовать PSD. Попробуйте растрировать эффекты или сохранить копию.",
+    e_ai_bad: "Не удалось открыть файл.", e_ai_nopdf: "AI сохранён без PDF-совместимости. В Illustrator: «Сохранить как» → отметьте «Создать PDF-совместимый файл».",
+    e_fig_file: "Файл .fig не читается — вставьте ссылку на фрейм Figma.", e_format: "Поддерживаются PSD, AI, PDF, PNG и ссылки Figma.",
+    e_figma_url: "Это не ссылка на Figma.", e_figma_node: "В ссылке нет фрейма: выделите фрейм → правый клик → Copy link to selection.",
+    e_figma_token: "Figma не приняла токен. Проверьте его и доступ «File content: read».", e_figma_access: "С этим токеном нет доступа к файлу.",
+    e_figma_rate: "Figma просит подождать минуту — попробуйте ещё раз.", e_figma_not_frame: "Ссылка ведёт не на фрейм — выделите фрейм целиком.",
+    e_figma_timeout: "Figma долго не отвечает — попробуйте ещё раз.", e_empty: "В макете не нашлось ничего, кроме фото.",
+    e_import_failed: "Не удалось разобрать макет.", e_http413: "Файл больше 60 МБ.",
   },
   en: {
     templates: "Templates", brand: "Brand", newTpl: "New template", chooseStart: "Start from",
@@ -233,6 +253,26 @@ const TT = {
     errLimit: "Template limit reached.", previewTitle: "A two-line post headline", previewSub: "Subheadline",
     sheetClose: "Close", selectHint: "Pick a layer in the list or on the image.", tplName: "Template name",
     up: "Up", down: "Down", hide: "Hide", show: "Show",
+    tImage: "Graphic", tImageAdd: "Image (PNG)", fitImg: "Size", fitBox: "Custom", fitCover: "Fill", fitStretch: "Stretch",
+    importBtn: "Import a layout", importTitle: "Import a layout", importStory: "Import stories from a layout",
+    importHow: "Photo: a layer named “photo”, or the bottom full-frame layer. Text that changes per post: name layers title, subtitle, hashtag or type {title}, {subtitle}, {hashtag} in them. Brand logo: a layer named logo. Everything else comes over as graphics.",
+    importFile: "PSD, AI, PDF or PNG file", importFigma: "Figma frame", figmaLink: "Frame link", figmaToken: "Figma token",
+    figmaHint: "Select the frame → right-click → Copy link to selection. Token: Figma → Settings → Security → Personal access tokens, scope “File content: read”. The token is used once and never stored.",
+    importGo: "Import", importing: "Reading the layout…", importDone: "Layout imported",
+    repPieces: "Graphics: {n}", repRoles: "Live text: {list}", repLogo: "Brand logo placed", repNoText: "No live text found — everything came over as graphics. Mark layers in the layout or add text here.",
+    repFont: "Font “{f}” not found — Inter is used instead. Upload the font file in Brand and pick it in the layer.",
+    w_group_bg: "Group “{x}” had a background — it wasn't carried over because it contains live text.", w_first_artboard: "The first artboard was used.",
+    w_nested: "Some markers are inside groups — ungroup them in the layout.", w_render_missing: "Some Figma graphics failed to render.",
+    w_text: "Text layer “{x}” couldn't be read — it came over as graphics.",
+    e_png_opaque: "This PNG has no transparency. You need an overlay: everything except the photo on a transparent background.", e_psd_bad: "Couldn't read the PSD.",
+    e_psd_render: "Couldn't render the PSD. Try rasterising effects or saving a copy.",
+    e_ai_bad: "Couldn't open the file.", e_ai_nopdf: "The AI file was saved without PDF compatibility. In Illustrator: Save As → tick “Create PDF Compatible File”.",
+    e_fig_file: "A .fig file can't be read — paste a link to a Figma frame.", e_format: "Supported: PSD, AI, PDF, PNG and Figma links.",
+    e_figma_url: "This isn't a Figma link.", e_figma_node: "The link has no frame: select the frame → right-click → Copy link to selection.",
+    e_figma_token: "Figma rejected the token. Check it and the “File content: read” scope.", e_figma_access: "This token has no access to the file.",
+    e_figma_rate: "Figma asks to wait a minute — try again.", e_figma_not_frame: "The link doesn't point to a frame — select the whole frame.",
+    e_figma_timeout: "Figma is taking too long — try again.", e_empty: "The layout has nothing but the photo.",
+    e_import_failed: "Couldn't read the layout.", e_http413: "The file is over 60 MB.",
   },
 };
 let LANG = "ru";
@@ -283,6 +323,7 @@ async function api(method, path, body, isForm) {
   return r;
 }
 function errText(e) {
+  if (e.code && TT.ru["e_" + e.code]) return t("e_" + e.code);
   return ({ net: t("errNet"), auth: t("errAuth"), owner_only: t("errOwner"), logo_bad: t("errLogo"),
             logo_empty: t("errLogoEmpty"), font_bad: t("errFont"), photo_bad: t("errPhoto"), limit: t("errLimit") })[e.code] || t("errNet");
 }
@@ -558,7 +599,42 @@ function drawOverlay(ctx, L, env) {
   ctx.fillRect(0, 0, W, H);
   return [0, 0, W, H];
 }
-const DRAW = { text: drawText, logo: drawLogo, rect: drawRect, gradient: drawGradient, overlay: drawOverlay };
+/* --- графика из макета (render.py → draw_image_layer) --- */
+const IMG_STATE = { map: new Map(), pending: {} };
+function ensureImage(asset) {
+  if (IMG_STATE.map.has(asset)) return Promise.resolve();
+  if (IMG_STATE.pending[asset]) return IMG_STATE.pending[asset];
+  const p = api("GET", `asset/${asset}`).then(r => r.blob()).then(blobImage)
+    .then(img => { IMG_STATE.map.set(asset, img); })
+    .catch(() => { IMG_STATE.map.set(asset, null); })
+    .finally(() => { delete IMG_STATE.pending[asset]; });
+  IMG_STATE.pending[asset] = p;
+  return p;
+}
+function imagesOf(layers) {
+  return [...new Set((layers || []).filter(L => L.type === "image" && !L.hidden).map(L => L.asset))];
+}
+function drawImageLayer(ctx, L, env) {
+  const img = env.images && env.images.get(L.asset);
+  if (!img) return null;
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  ctx.globalAlpha = L.opacity ?? 1;
+  ctx.imageSmoothingQuality = "high";
+  let box;
+  if (L.fit === "stretch") { ctx.drawImage(img, 0, 0, W, H); box = [0, 0, W, H]; }
+  else if (L.fit === "cover") { drawPhoto(ctx, img, W, H); box = [0, 0, W, H]; }
+  else {
+    const w = Math.max(1, Math.round((L.w ?? 0.2) * W));
+    const h = Math.max(1, Math.round(w * img.naturalHeight / img.naturalWidth));
+    let [left, top] = place(L.anchor || "mc", L.x || 0, L.y || 0, w, h, W, H);
+    left = Math.round(left); top = Math.round(top);
+    ctx.drawImage(img, left, top, w, h);
+    box = [left, top, w, h];
+  }
+  ctx.globalAlpha = 1;
+  return box;
+}
+const DRAW = { text: drawText, logo: drawLogo, rect: drawRect, gradient: drawGradient, overlay: drawOverlay, image: drawImageLayer };
 
 function drawPhoto(ctx, photo, W, H) {
   const pw = photo.naturalWidth || photo.width, ph = photo.naturalHeight || photo.height;
@@ -594,7 +670,7 @@ const APP = {
 const root = () => document.getElementById("app");
 
 function env(dark) {
-  return { palette: APP.state.brand.palette, logos: APP.logos, fields: APP.fields, dark: dark || 0 };
+  return { palette: APP.state.brand.palette, logos: APP.logos, fields: APP.fields, dark: dark || 0, images: IMG_STATE.map };
 }
 function photoFor() { return APP.localPhoto || APP.sample; }
 
@@ -652,7 +728,7 @@ function thumb(spec, w) {
   const [W, H] = FEED_SIZES["4:5"];
   const scale = w / W;
   const layers = spec.feed.layers;
-  Promise.all(fontsOf(layers).map(ensureFont)).then(() => {
+  Promise.all([...fontsOf(layers).map(ensureFont), ...imagesOf(layers).map(ensureImage)]).then(() => {
     const big = document.createElement("canvas");
     renderSurface(big, 540, 675, photoFor(), layers, env());
     c.width = Math.round(W * scale * 2); c.height = Math.round(H * scale * 2);
@@ -671,7 +747,70 @@ function renderTemplates(r) {
   }
   r.append(sec);
   if (list.length < APP.state.max_templates)
-    r.append(h("div", { style: "padding: 0 12px" }, h("button", { class: "btn primary block", onclick: presetSheet }, t("newTpl"))));
+    r.append(h("div", { style: "padding: 0 12px; display: grid; gap: 8px" },
+      h("button", { class: "btn primary block", onclick: presetSheet }, t("newTpl")),
+      h("button", { class: "btn block", style: "background: var(--bg)", onclick: () => importSheet("new") }, t("importBtn"))));
+}
+function importSheet(target, tid) {
+  const body = h("div", {});
+  const bg = sheet(t("importTitle"), body);
+  const status = h("p", { class: "hint", role: "status" });
+  const done = res => {
+    bg.remove();
+    const tp = res.template;
+    const i = APP.state.templates.findIndex(x => x.id === tp.id);
+    if (i >= 0) APP.state.templates[i] = tp; else APP.state.templates.push(tp);
+    if (target === "story" && APP.tpl && APP.tpl.id === tp.id) {
+      APP.tpl.spec.story = clone(tp.spec.story);
+      APP.surface = "story";
+      go("editor");
+    } else openEditor(tp);
+    haptic("success");
+    reportSheet(res.report);
+  };
+  const fail = e => { status.textContent = errText(e); haptic("error"); };
+  const busy = on => { status.textContent = on ? t("importing") : ""; body.querySelectorAll("button").forEach(b => b.disabled = on); };
+  const choose = h("div", { class: "list" },
+    h("button", { onclick: () => pickFile(".psd,.ai,.pdf,.png,image/png,application/pdf", async f => {
+      const fd = new FormData();
+      fd.append("target", target);
+      if (tid) fd.append("tid", String(tid));
+      fd.append("file", f, f.name);
+      busy(true);
+      try { done(await (await api("POST", "import", fd, true)).json()); } catch (e) { busy(false); fail(e); }
+    }) }, t("importFile")),
+    h("button", { onclick: () => { choose.remove(); body.append(figmaForm); } }, t("importFigma")));
+  const link = h("input", { type: "text", placeholder: "https://www.figma.com/design/…", "aria-label": t("figmaLink"), autocomplete: "off" });
+  const token = h("input", { type: "password", placeholder: "figd_…", "aria-label": t("figmaToken"), autocomplete: "off",
+    style: "width:100%;border:1px solid var(--line);background:var(--bg);border-radius:9px;padding:9px 10px" });
+  const figmaForm = h("div", {},
+    h("div", { class: "row" }, h("label", {}, t("figmaLink")), h("div", { class: "ctl" }, link)),
+    h("div", { class: "row" }, h("label", {}, t("figmaToken")), h("div", { class: "ctl" }, token)),
+    h("p", { class: "hint" }, t("figmaHint")),
+    h("button", { class: "btn primary block", onclick: async () => {
+      busy(true);
+      try {
+        done(await (await api("POST", "import/figma", { url: link.value.trim(), token: token.value.trim(), target, tid: tid || null })).json());
+      } catch (e) { busy(false); fail(e); }
+      finally { token.value = ""; }
+    } }, t("importGo")));
+  body.append(h("p", { class: "hint" }, t("importHow")), choose, status);
+}
+function reportSheet(rep) {
+  const names = { title: t("srcTitle"), subtitle: t("srcSubtitle"), hashtag: t("srcHashtag"), counter: t("srcCounter") };
+  const box = h("div", {});
+  const line = txt => box.append(h("p", {}, txt));
+  if (rep.pieces) line(t("repPieces").replace("{n}", rep.pieces));
+  if (rep.roles && rep.roles.length) line(t("repRoles").replace("{list}", [...new Set(rep.roles)].map(r => names[r] || r).join(", ")));
+  else box.append(h("p", { class: "hint" }, t("repNoText")));
+  if (rep.logos) line(t("repLogo"));
+  for (const f of rep.missing_fonts || []) box.append(h("p", { class: "hint" }, t("repFont").replace("{f}", f)));
+  for (const w of rep.warnings || []) {
+    const [code, x] = String(w).split(/:(.*)/s);
+    const key = "w_" + code;
+    if (TT.ru[key]) box.append(h("p", { class: "hint" }, t(key).replace("{x}", x || "")));
+  }
+  sheet(t("importDone"), box);
 }
 function sheet(title, body) {
   const bg = h("div", { class: "sheet-bg", onclick: e => { if (e.target === bg) bg.remove(); } },
@@ -817,6 +956,8 @@ function draw() {
   const L = layers();
   const need = fontsOf(L).filter(k => !FONT_STATE.loaded.has(fontInfo(k).key));
   if (need.length) { Promise.all(need.map(ensureFont)).then(schedule); }
+  const needImg = imagesOf(L).filter(a => !IMG_STATE.map.has(a));
+  if (needImg.length) { Promise.all(needImg.map(ensureImage)).then(schedule); }
   const [W, H] = dims();
   APP.boxes = renderSurface(cv, W, H, photoFor(), L, env());
   const ctx = cv.getContext("2d");
@@ -829,7 +970,7 @@ function draw() {
   }
   const b = APP.sel && APP.boxes[APP.sel];
   const S = selLayer();
-  if (b && S && !(S.type === "gradient" || S.type === "overlay")) {
+  if (b && S && !(S.type === "gradient" || S.type === "overlay" || (S.type === "image" && S.fit !== "box"))) {
     ctx.save();
     ctx.setLineDash([lw * 4, lw * 3]);
     ctx.lineWidth = lw;
@@ -908,7 +1049,8 @@ function renderEditor(r) {
         spec.story.enabled = true;
         if (!spec.story.layers.length) spec.story.layers = clone(spec.feed.layers).map(L => ({ ...L, id: uid() }));
         markDirty(); go("editor");
-      } }, t("storyEnable")))));
+      } }, t("storyEnable"))),
+      h("div", { class: "row" }, h("button", { class: "btn ghost", onclick: () => importSheet("story", APP.tpl.id) }, t("importStory")))));
     tail(r);
     requestAnimationFrame(draw);
     return;
@@ -951,9 +1093,10 @@ function layerTitle(L) {
     return t({ title: "srcTitle", subtitle: "srcSubtitle", hashtag: "srcHashtag", counter: "srcCounter" }[L.source] || "srcStatic");
   }
   if (L.type === "rect") return L.fit === "inset" ? t("tFrame") : t("tRect");
+  if (L.type === "image") return t("tImage");
   return t(L.type === "gradient" ? "tGradient" : "tOverlay");
 }
-const GLYPH = { logo: "◎", text: "Aa", rect: "□", gradient: "◐", overlay: "■" };
+const GLYPH = { logo: "◎", text: "Aa", rect: "□", gradient: "◐", overlay: "■", image: "▦" };
 function renderLayerList() {
   const box = document.getElementById("layers");
   if (!box) return;
@@ -1008,6 +1151,20 @@ function addLayerSheet() {
   ];
   const list = h("div", { class: "list" });
   const bg = sheet(t("addLayer"), list);
+  list.append(h("button", { onclick: () => {
+    bg.remove();
+    pickFile("image/png,image/*", async f => {
+      const fd = new FormData();
+      fd.append("file", f, f.name);
+      try {
+        const res = await (await api("POST", "upload/image", fd, true)).json();
+        const L = { type: "image", asset: res.asset, fit: "box", anchor: "mc", x: 0, y: 0, w: 0.3, opacity: 1, id: uid() };
+        layers().push(L);
+        markDirty();
+        select(L.id);
+      } catch (e) { toast(errText(e)); }
+    });
+  } }, t("tImageAdd")));
   for (const [label, proto] of items) {
     list.append(h("button", { onclick: () => {
       bg.remove();
@@ -1182,6 +1339,13 @@ function renderProps() {
   } else if (L.type === "overlay") {
     add(colorCtl(t("color"), () => L.color, c => { L.color = c; markDirty(); }));
     add(slider(t("opacity"), () => L.opacity, v => L.opacity = v, 0, 0.9, 0.01, pct));
+  } else if (L.type === "image") {
+    add(seg(t("fitImg"), [["box", t("fitBox")], ["cover", t("fitCover")], ["stretch", t("fitStretch")]], () => L.fit || "box", v => L.fit = v, true));
+    if ((L.fit || "box") === "box") {
+      add(...posCtls(L));
+      add(slider(t("width"), () => L.w, v => L.w = v, 0.01, 1.2, 0.001, px));
+    }
+    add(slider(t("opacity"), () => L.opacity, v => L.opacity = v, 0, 1, 0.01, pct));
   }
   add(h("div", { class: "row" },
     h("button", { class: "btn ghost", onclick: () => {
@@ -1223,7 +1387,8 @@ function bindDrag(cv) {
     const r = cv.getBoundingClientRect();
     return [(e.clientX - r.left) * cv.width / r.width, (e.clientY - r.top) * cv.height / r.height];
   };
-  const movable = L => L && !L.hidden && !(L.type === "gradient" || L.type === "overlay" || (L.type === "rect" && L.fit === "inset"));
+  const movable = L => L && !L.hidden && !(L.type === "gradient" || L.type === "overlay"
+    || (L.type === "rect" && L.fit === "inset") || (L.type === "image" && L.fit !== "box"));
   cv.addEventListener("pointerdown", e => {
     const [x, y] = toCanvas(e);
     const tol = cv.width * 0.02;
@@ -1314,7 +1479,7 @@ window.addEventListener("resize", () => APP.screen === "editor" && fitStage());
     b.textContent = errText(e);
   }
 })();
-window.NB = { renderSurface, ensureFont, fontsOf, APP };
+window.NB = { renderSurface, ensureFont, fontsOf, ensureImage, imagesOf, IMG_STATE, APP, importSheet };
 </script>
 </body>
 </html>
