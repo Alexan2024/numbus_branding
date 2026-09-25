@@ -22,8 +22,9 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application, BaseUpdateProcessor, CallbackQueryHandler, CommandHandler,
-    ContextTypes, ConversationHandler, MessageHandler, filters,
+    ContextTypes, ConversationHandler, ExtBot, MessageHandler, TypeHandler, filters,
 )
+from telegram.request import HTTPXRequest
 from telegram.warnings import PTBUserWarning
 from PIL import Image
 
@@ -74,6 +75,91 @@ class PerUserProcessor(BaseUpdateProcessor):
 
     async def shutdown(self):
         pass
+
+
+# ============ Уборка чата ============
+# Бот сам убирает отработанное, чтобы в чате оставались только меню, пульт
+# и готовые файлы:
+#   • ваши сообщения (команды, ответы, исходные фото) — сразу после обработки;
+#   • вопросы бота (kind="prompt") — когда вы ответили следующим сообщением;
+#   • предупреждения (kind="notice") — через NOTICE_TTL секунд;
+#   • старое меню и старый пульт — когда появились новые.
+# Готовые файлы не трогаются. Всё, что бот отправил, пишется в журнал
+# (db.msglog) — по нему работает «Очистить чат» в админ-панели.
+NOTICE_TTL = 20
+PROMPTS = {}        # chat_id → id вопросов, ждущих ответа
+MENU_MSG = {}       # chat_id → id текущего меню
+_TASKS = set()
+
+
+class LoggingBot(ExtBot):
+    """Записывает всё, что бот отправляет в личку, в журнал сообщений."""
+
+    async def _send_message(self, endpoint, data, *args, **kwargs):
+        msg = await super()._send_message(endpoint, data, *args, **kwargs)
+        try:
+            if msg and getattr(msg, "chat", None) and msg.chat.type == "private":
+                db.log_msg(msg.chat.id, msg.message_id, "result" if endpoint == "sendDocument" else "bot")
+        except Exception as e:
+            logger.debug("msglog: %s", e)
+        return msg
+
+
+async def delete_ids(bot, chat_id, ids):
+    ids = sorted({int(i) for i in ids if i})
+    if not ids:
+        return
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i + 100]
+        try:   # deleteMessages (Bot API 7.0) — пачкой; PTB 20.7 его не знает, вызываем напрямую
+            await bot._post("deleteMessages", {"chat_id": chat_id, "message_ids": chunk})
+        except Exception:
+            for m in chunk:
+                try:
+                    await bot.delete_message(chat_id, m)
+                except TelegramError:
+                    pass
+    db.unlog_msgs(chat_id, ids)
+
+
+def delete_later(bot, chat_id, ids, delay):
+    async def job():
+        try:
+            await asyncio.sleep(delay)
+            await delete_ids(bot, chat_id, ids)
+        except asyncio.CancelledError:
+            pass
+    t = asyncio.create_task(job())
+    _TASKS.add(t)
+    t.add_done_callback(_TASKS.discard)
+
+
+def track(msg, kind="prompt", ttl=None):
+    if msg is None:
+        return msg
+    ttl = ttl or NOTICE_TTL
+    chat_id = msg.chat_id
+    if kind == "prompt":
+        PROMPTS.setdefault(chat_id, []).append(msg.message_id)
+    elif kind == "notice":
+        delete_later(msg.get_bot(), chat_id, [msg.message_id], ttl)
+    return msg
+
+
+async def pre_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """До обработки: запоминаем вопросы, на которые сейчас пришёл ответ."""
+    m = update.message
+    if m and m.chat.type == "private" and update.effective_user and not update.effective_user.is_bot:
+        db.log_msg(m.chat_id, m.message_id, "user")
+        ctx.user_data["_answered"] = PROMPTS.pop(m.chat_id, [])
+
+
+async def post_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """После обработки: убираем ответ пользователя и вопросы, на которые он ответил."""
+    m = update.message
+    if m and m.chat.type == "private" and update.effective_user and not update.effective_user.is_bot:
+        ids = ctx.user_data.pop("_answered", []) + [m.message_id]
+        await delete_ids(ctx.bot, m.chat_id, ids)
 
 
 # ============ Утилиты ============
@@ -141,9 +227,11 @@ async def answer(update):
             pass
 
 
-async def say(update, text, kb=None):
-    return await update.effective_chat.send_message(text, parse_mode=HTML, reply_markup=kb,
-                                                    disable_web_page_preview=True)
+async def say(update, text, kb=None, kind="prompt", ttl=None):
+    """kind: prompt — убрать после ответа; notice — убрать через ttl; keep/menu — оставить."""
+    m = await update.effective_chat.send_message(text, parse_mode=HTML, reply_markup=kb,
+                                                 disable_web_page_preview=True)
+    return track(m, kind, ttl)
 
 
 async def strip_kb(update):
@@ -193,7 +281,7 @@ async def get_file_bytes(update, ctx):
             return bytes(await f.download_as_bytearray()), True
     except BadRequest as e:
         if "too big" in str(e).lower():
-            await say(update, tx(ctx, "file_big"))
+            await say(update, tx(ctx, "file_big"), kind="notice")
             return None, False
         raise
     return None, False
@@ -223,7 +311,7 @@ def menu_text(ctx, b):
     return "\n".join(lines)
 
 
-def menu_kb(ctx, b, brands):
+def menu_kb(ctx, b, brands, admin=False):
     rows = []
     if b["role"] == "owner":
         eb = editor_btn(ctx, b["id"])
@@ -238,19 +326,33 @@ def menu_kb(ctx, b, brands):
     row.append(Btn(tx(ctx, "b_code"), callback_data="menu:code"))
     rows.append(row)
     rows.append([Btn(tx(ctx, "b_lang"), callback_data="menu:lang")])
+    if admin:
+        rows.append([Btn("🛠 Админ", callback_data="adm:panel")])
     return KB(rows)
 
 
 async def show_menu(update, ctx, edit=False):
     b, brands = current_brand(update.effective_user.id)
+    chat_id = update.effective_chat.id
     if not b:
-        await say(update, tx(ctx, "welcome_new"))
+        kb = KB([[Btn("🛠 Админ", callback_data="adm:panel")]]) if is_admin(update) else None
+        await say(update, tx(ctx, "welcome_new"), kb)
         return CODE
-    text, kb = menu_text(ctx, b), menu_kb(ctx, b, brands)
-    if edit:
-        await edit_or_say(update, text, kb)
-    else:
-        await say(update, text, kb)
+    text, kb = menu_text(ctx, b), menu_kb(ctx, b, brands, is_admin(update))
+    q = update.callback_query
+    if edit and q and q.message and not q.message.photo:
+        try:
+            await q.edit_message_text(text, parse_mode=HTML, reply_markup=kb, disable_web_page_preview=True)
+            MENU_MSG[chat_id] = q.message.message_id
+            return MENU
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                return MENU
+    old = MENU_MSG.get(chat_id)
+    m = await say(update, text, kb, kind="menu")
+    MENU_MSG[chat_id] = m.message_id
+    if old and old != m.message_id:
+        await delete_ids(ctx.bot, chat_id, [old])
     return MENU
 
 
@@ -266,7 +368,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_cancel(update, ctx):
     L(ctx, update)
     reset_session(ctx)
-    await say(update, tx(ctx, "cancelled"))
+    await say(update, tx(ctx, "cancelled"), kind="notice")
     return await show_menu(update, ctx)
 
 
@@ -310,7 +412,7 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_desktop_link(update, ctx, b)
         return MENU
     if action == "new":   # кнопка из старых сообщений
-        await say(update, tx(ctx, "q_hint"))
+        await say(update, tx(ctx, "q_hint"), kind="notice")
         return MENU
     return await show_menu(update, ctx, edit=True)
 
@@ -335,7 +437,7 @@ async def send_desktop_link(update, ctx, b):
     tok = db.create_login_link(update.effective_user.id, b["id"])
     url = f"{WEBAPP_URL}/?b={b['id']}&k={tok}"
     await say(update, tx(ctx, "desktop_link", min=db.LINK_TTL_MIN),
-              KB([[Btn(tx(ctx, "b_open_desktop"), url=url)]]))
+              KB([[Btn(tx(ctx, "b_open_desktop"), url=url)]]), kind="notice", ttl=db.LINK_TTL_MIN * 60)
 
 
 async def cmd_desktop(update, ctx):
@@ -372,14 +474,14 @@ async def do_join(update, ctx, token):
     name = esc(b["kit"].get("name") or "—")
     if db.member_role(b["id"], u.id):
         db.set_active_brand(u.id, b["id"])
-        await say(update, tx(ctx, "join_ok", brand=name))
+        await say(update, tx(ctx, "join_ok", brand=name), kind="notice")
         return await show_menu(update, ctx)
     if db.member_count(b["id"]) >= plan_limits(b)["members"]:
         await say(update, tx(ctx, "join_full", brand=name))
         return await show_menu(update, ctx)
     db.add_member(b["id"], u.id, "editor")
     db.set_active_brand(u.id, b["id"])
-    await say(update, tx(ctx, "join_ok", brand=name))
+    await say(update, tx(ctx, "join_ok", brand=name), kind="notice")
     owner = db.get_user(b["owner_id"]) or {}
     who = esc(u.full_name) + (f" (@{u.username})" if u.username else "")
     try:
@@ -454,9 +556,9 @@ async def on_logo(update, ctx):
     bid = kit_bid(ctx)
     db.set_asset(bid, "logo", png)
     if as_photo:
-        await say(update, tx(ctx, "logo_photo"))
+        await say(update, tx(ctx, "logo_photo"), kind="notice", ttl=40)
     elif not had_alpha:
-        await say(update, tx(ctx, "logo_bg"))
+        await say(update, tx(ctx, "logo_bg"), kind="notice", ttl=40)
     eb = editor_btn(ctx, bid)
     await say(update, tx(ctx, "wiz_done") if eb else tx(ctx, "editor_off"), KB([[eb]]) if eb else None)
     reset_session(ctx)
@@ -575,13 +677,11 @@ async def show_pult(bot, chat_id, ctx, new=False):
             if "not modified" in str(e).lower():
                 return
             logger.info("pult edit failed, sending new: %s", e)
-    if d.get("msg") and new:
-        try:
-            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=d["msg"], reply_markup=None)
-        except TelegramError:
-            pass
+    old = d.get("msg")
     m = await bot.send_photo(chat_id, io.BytesIO(data), caption=caption, parse_mode=HTML, reply_markup=kb)
     d["msg"] = m.message_id
+    if old and old != m.message_id:
+        await delete_ids(bot, chat_id, [old])    # старый пульт больше не нужен
 
 
 def schedule_pult(update, ctx):
@@ -623,7 +723,7 @@ async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not data:
         return
     if not is_image(data):
-        await say(update, tx(ctx, "photo_bad"))
+        await say(update, tx(ctx, "photo_bad"), kind="notice")
         return
     msg = update.message
     gid, cap = msg.media_group_id, msg.caption
@@ -636,7 +736,7 @@ async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if len(d["photos"]) >= MAX_BATCH:
             if not d.get("warned_max"):
                 d["warned_max"] = True
-                await say(update, tx(ctx, "photos_max", n=MAX_BATCH))
+                await say(update, tx(ctx, "photos_max", n=MAX_BATCH), kind="notice")
             return
         d["photos"].append(data)
         d["ts"] = now
@@ -651,6 +751,8 @@ async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if fmt == "9:16" and tp["spec"]["story"].get("enabled"):
             fmt = "4:5"
         title, subtitle, tag = parse_text(cap, R.spec_fields(tp["spec"]))
+        if d and d.get("msg"):   # пульт прошлого поста уходит, когда начат новый
+            await delete_ids(ctx.bot, update.effective_chat.id, [d["msg"]])
         ctx.user_data["q"] = d = {"bid": b["id"], "photos": [data], "group": gid, "ts": now, "tid": tp["id"],
                                   "fmt": fmt, "dark": R.DARK_DEFAULT_IDX, "title": title, "subtitle": subtitle,
                                   "tag": tag, "msg": None, "sent": False}
@@ -776,7 +878,7 @@ async def send_files(update, ctx, d, tp):
     left = plan_limits(b)["photos"] - db.photos_used(b["id"])
     if n > left:
         await update.callback_query.answer()
-        await say(update, tx(ctx, "limit_hit", left=max(0, left), n=n, support=esc(SUPPORT)))
+        await say(update, tx(ctx, "limit_hit", left=max(0, left), n=n, support=esc(SUPPORT)), kind="notice", ttl=60)
         return
     await update.callback_query.answer(tx(ctx, "q_sending"))
     d["base"] = d.get("base") or await run(web.brand_ctx, d["bid"])
@@ -793,7 +895,7 @@ async def send_files(update, ctx, d, tp):
             ok += 1
         except Exception as e:
             logger.exception("photo %s: %s", i, e)
-            await say(update, tx(ctx, "photo_err", i=i))
+            await say(update, tx(ctx, "photo_err", i=i), kind="notice", ttl=60)
     db.record_event(d["bid"], update.effective_user.id, "tpl", ok)
     db.set_prefs(update.effective_user.id, d["bid"], tid=d["tid"], fmt=d["fmt"])
     d["sent"] = True
@@ -806,7 +908,10 @@ async def on_quick_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     d = draft(ctx)
     if not aw or not d:
         b, _ = current_brand(update.effective_user.id)
-        await say(update, tx(ctx, "q_hint") if b else tx(ctx, "welcome_new"))
+        if b:
+            await say(update, tx(ctx, "q_hint"), kind="notice")
+        else:
+            await say(update, tx(ctx, "welcome_new"))
         return
     text = update.message.text or ""
     if aw == "tag":
@@ -826,6 +931,118 @@ async def on_quick_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============ Админ ============
+PLAN_LABEL = {"pilot": "Pilot", "solo": "Solo", "media": "Media", "studio": "Studio"}
+
+
+def admin_text(uid, b):
+    if not b:
+        return ("🛠 <b>Админ-панель</b>\nАктивного бренда нет. Создайте код /newcode и отправьте его боту.")
+    lim = plan_limits(b)
+    role = db.member_role(b["id"], uid)
+    active = db.plan_active(b)
+    return ("🛠 <b>Админ-панель</b>\n"
+            f"Бренд: <b>{esc(b['kit'].get('name') or '—')}</b> #{b['id']}\n"
+            f"Тариф: {PLAN_LABEL.get(b['plan'], b['plan'])} · до {fmt_date(b['plan_until'])} · "
+            f"{'✅ активен' if active else '⛔ истёк'}\n"
+            f"Фото в месяце: {db.photos_used(b['id'])} из {lim['photos']}\n"
+            f"Команда: {db.member_count(b['id'])} из {lim['members']}\n"
+            f"Ваша роль: {'владелец' if role == 'owner' else 'участник'}\n\n"
+            "<i>Тарифы различаются лимитом фото и размером команды. "
+            "Переключение действует на ваш текущий бренд.</i>")
+
+
+def admin_kb(uid, b):
+    rows = []
+    if b:
+        rows.append([Btn(("✓ " if b["plan"] == k else "") + v, callback_data=f"adm:plan:{k}")
+                     for k, v in PLAN_LABEL.items() if k in db.PLANS])
+        rows.append([Btn("⛔ Сделать истёкшим", callback_data="adm:expire"),
+                     Btn("♻️ +30 дней", callback_data="adm:extend")])
+        rows.append([Btn("🔄 Обнулить фото месяца", callback_data="adm:reset")])
+        role = db.member_role(b["id"], uid)
+        rows.append([Btn("👤 Смотреть как участник" if role == "owner" else "👑 Вернуть роль владельца",
+                         callback_data="adm:role")])
+    rows.append([Btn("🧹 Очистить чат", callback_data="adm:clear"),
+                 Btn("🧹 Вместе с файлами", callback_data="adm:clearall")])
+    rows.append([Btn("‹ Меню", callback_data="menu:home")])
+    return KB(rows)
+
+
+async def show_admin(update, ctx):
+    uid = update.effective_user.id
+    b, _ = current_brand(uid)
+    text, kb = admin_text(uid, b), admin_kb(uid, b)
+    q = update.callback_query
+    if q and q.message and not q.message.photo:
+        try:
+            await q.edit_message_text(text, parse_mode=HTML, reply_markup=kb)
+            MENU_MSG[update.effective_chat.id] = q.message.message_id
+            return
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                return
+    old = MENU_MSG.get(update.effective_chat.id)
+    m = await say(update, text, kb, kind="menu")
+    MENU_MSG[update.effective_chat.id] = m.message_id
+    if old and old != m.message_id:
+        await delete_ids(ctx.bot, update.effective_chat.id, [old])
+
+
+async def clear_chat(update, ctx, with_results):
+    chat_id = update.effective_chat.id
+    ids = db.chat_msgs(chat_id, with_results=with_results)
+    await delete_ids(ctx.bot, chat_id, ids)
+    PROMPTS.pop(chat_id, None)
+    MENU_MSG.pop(chat_id, None)
+    ctx.user_data.pop("q", None)
+    return len(ids)
+
+
+async def cmd_admin(update, ctx):
+    if not is_admin(update):
+        return
+    L(ctx, update)
+    await show_admin(update, ctx)
+
+
+async def on_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    L(ctx, update)
+    q = update.callback_query
+    if not is_admin(update):
+        await on_stale(update, ctx)
+        return
+    parts = q.data.split(":")
+    action = parts[1] if len(parts) > 1 else "panel"
+    uid = update.effective_user.id
+    b, _ = current_brand(uid)
+    note = None
+    if action in ("clear", "clearall"):
+        await q.answer("Чищу…")
+        n = await clear_chat(update, ctx, action == "clearall")
+        logger.info("admin %s cleared %s messages", uid, n)
+        await show_menu(update, ctx)
+        return
+    if b and action == "plan" and len(parts) > 2:
+        db.set_plan(b["id"], parts[2])
+        note = f"Тариф: {PLAN_LABEL.get(parts[2], parts[2])}"
+    elif b and action == "expire":
+        db.expire_brand(b["id"])
+        note = "Подписка истекла"
+    elif b and action == "extend":
+        db.extend_brand(b["id"], 30)
+        note = "Продлено на 30 дней"
+    elif b and action == "reset":
+        db.reset_usage(b["id"])
+        note = "Счётчик фото обнулён"
+    elif b and action == "role":
+        role = db.member_role(b["id"], uid)
+        db.set_member_role(b["id"], uid, "editor" if role == "owner" else "owner")
+        note = "Роль: участник" if role == "owner" else "Роль: владелец"
+    try:
+        await q.answer(note or "")
+    except TelegramError:
+        pass
+    await show_admin(update, ctx)
 def is_admin(update):
     return update.effective_user and update.effective_user.id in ADMIN_IDS
 
@@ -919,7 +1136,7 @@ async def on_stale(update, ctx):
 
 async def on_orphan(update, ctx):
     L(ctx, update)
-    await say(update, tx(ctx, "stale"))
+    await say(update, tx(ctx, "stale"), kind="notice")
 
 
 async def on_error(update, ctx):
@@ -928,9 +1145,12 @@ async def on_error(update, ctx):
 
 # ============ Сборка ============
 def build_app(token=None):
-    app = (Application.builder().token(token or TOKEN)
+    bot = LoggingBot(token or TOKEN,
+                     request=HTTPXRequest(connection_pool_size=64, read_timeout=120, write_timeout=120,
+                                          connect_timeout=30),
+                     get_updates_request=HTTPXRequest(connection_pool_size=2, read_timeout=60))
+    app = (Application.builder().bot(bot)
            .concurrent_updates(PerUserProcessor(64))
-           .read_timeout(120).write_timeout(120).connect_timeout(30)
            .build())
     IMG = filters.PHOTO | filters.Document.ALL
     TXT = filters.TEXT & ~filters.COMMAND
@@ -951,7 +1171,11 @@ def build_app(token=None):
         fallbacks=[CommandHandler("cancel", cmd_cancel), CommandHandler("start", cmd_start)],
         allow_reentry=True,
     )
+    app.add_handler(TypeHandler(Update, pre_update), group=-1)
+    app.add_handler(TypeHandler(Update, post_update), group=1)
     app.add_handler(CommandHandler("myid", cmd_myid))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CallbackQueryHandler(on_admin, pattern="^adm:"))
     app.add_handler(CommandHandler("desktop", cmd_desktop))
     app.add_handler(CommandHandler("newcode", cmd_newcode))
     app.add_handler(CommandHandler("codes", cmd_codes))

@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS templates (
     updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_templates_brand ON templates (brand_id, sort);
+CREATE TABLE IF NOT EXISTS msglog (
+    chat_id INTEGER NOT NULL,
+    msg_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,              -- user | bot | result (готовые файлы)
+    ts TEXT NOT NULL,
+    PRIMARY KEY (chat_id, msg_id)
+);
 CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
     kind TEXT NOT NULL,              -- link (одноразовая, 15 мин) | session (7 дней)
@@ -500,3 +507,60 @@ def check_session(tok: str):
 def drop_session(tok: str):
     with _conn() as c:
         c.execute("DELETE FROM sessions WHERE token=?", (tok or "",))
+
+
+# ============ Админ: режимы подписки для проверки ============
+def set_plan(brand_id: int, plan: str) -> bool:
+    """Меняет тариф; если подписка уже истекла — заодно продлевает на 30 дней."""
+    b = get_brand(brand_id)
+    if not b or plan not in PLANS:
+        return False
+    with _conn() as c:
+        c.execute("UPDATE brands SET plan=? WHERE id=?", (plan, brand_id))
+    if not plan_active(get_brand(brand_id)):
+        extend_brand(brand_id, 30)
+    return True
+
+
+def expire_brand(brand_id: int):
+    with _conn() as c:
+        c.execute("UPDATE brands SET plan_until=? WHERE id=?",
+                  ((_now() - timedelta(days=1)).isoformat(), brand_id))
+
+
+def reset_usage(brand_id: int):
+    """Обнуляет счётчик фото за текущий месяц."""
+    with _conn() as c:
+        c.execute("DELETE FROM events WHERE brand_id=? AND ts>=?", (brand_id, month_start().isoformat()))
+
+
+def set_member_role(brand_id: int, tg_id: int, role: str):
+    with _conn() as c:
+        c.execute("UPDATE members SET role=? WHERE brand_id=? AND tg_id=?", (role, brand_id, tg_id))
+
+
+# ============ Журнал сообщений (для очистки чата) ============
+# Telegram позволяет боту удалять сообщения в личке не старше 48 часов.
+MSG_TTL_HOURS = 47
+
+
+def log_msg(chat_id: int, msg_id: int, kind: str):
+    with _conn() as c:
+        c.execute("INSERT OR REPLACE INTO msglog (chat_id, msg_id, kind, ts) VALUES (?,?,?,?)",
+                  (chat_id, msg_id, kind, _now().isoformat()))
+
+
+def unlog_msgs(chat_id: int, ids):
+    ids = list(ids)
+    if not ids:
+        return
+    with _conn() as c:
+        c.executemany("DELETE FROM msglog WHERE chat_id=? AND msg_id=?", [(chat_id, i) for i in ids])
+
+
+def chat_msgs(chat_id: int, with_results=False) -> list:
+    cutoff = (_now() - timedelta(hours=MSG_TTL_HOURS)).isoformat()
+    with _conn() as c:
+        c.execute("DELETE FROM msglog WHERE ts < ?", (cutoff,))
+        q = "SELECT msg_id FROM msglog WHERE chat_id=?" + ("" if with_results else " AND kind != 'result'")
+        return [r["msg_id"] for r in c.execute(q + " ORDER BY msg_id", (chat_id,))]
