@@ -44,12 +44,12 @@ PLANS = {
 
 DEFAULT_KIT = {
     "name": "",
-    "font": "nunito",      # ключ из render.FONTS или "custom"
-    "pos": "bl",           # bl | br | tl | tr
-    "size": "m",           # s | m | l
-    "color": "adaptive",   # adaptive | white | black
+    # p0 — светлый, p1 — тёмный, p2 — акцент, p3–p4 — дополнительные
+    "palette": ["#FFFFFF", "#141414", "#D9D9D9", "#7A7A7A", "#FFFFFF"],
     "hashtags": [],
+    "custom_fonts": {},    # {"font1": "Название шрифта"}
 }
+MAX_TEMPLATES = 30
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -96,6 +96,15 @@ CREATE TABLE IF NOT EXISTS events (
     ts TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_brand_ts ON events (brand_id, ts);
+CREATE TABLE IF NOT EXISTS templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    spec TEXT NOT NULL,
+    sort INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_templates_brand ON templates (brand_id, sort);
 """
 
 
@@ -165,6 +174,7 @@ def create_brand(owner_id: int, plan: str, days: int) -> int:
         bid = cur.lastrowid
         c.execute("INSERT INTO members (brand_id, tg_id, role) VALUES (?,?,?)", (bid, owner_id, "owner"))
         c.execute("UPDATE users SET active_brand=? WHERE tg_id=?", (bid, owner_id))
+    seed_templates(bid)
     return bid
 
 
@@ -331,3 +341,59 @@ def regen_token(brand_id: int) -> str:
     with _conn() as c:
         c.execute("UPDATE brands SET join_token=? WHERE id=?", (tok, brand_id))
     return tok
+
+
+# ============ Шаблоны ============
+def seed_templates(brand_id: int, lang: str = "ru"):
+    import spec as S
+    for key in S.SEED_PRESETS:
+        p = S.preset(key)
+        create_template(brand_id, p["name"].get(lang) or p["name"]["ru"], S.preset_spec(key))
+
+
+def _tpl_row(r):
+    t = dict(r)
+    try:
+        t["spec"] = json.loads(t["spec"])
+    except Exception:
+        t["spec"] = {"v": 1, "feed": {"layers": []}, "story": {"enabled": False, "layers": []}}
+    return t
+
+
+def list_templates(brand_id: int) -> list:
+    with _conn() as c:
+        return [_tpl_row(r) for r in c.execute(
+            "SELECT * FROM templates WHERE brand_id=? ORDER BY sort, id", (brand_id,))]
+
+
+def get_template(brand_id: int, tid: int):
+    with _conn() as c:
+        r = c.execute("SELECT * FROM templates WHERE id=? AND brand_id=?", (tid, brand_id)).fetchone()
+        return _tpl_row(r) if r else None
+
+
+def template_count(brand_id: int) -> int:
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) FROM templates WHERE brand_id=?", (brand_id,)).fetchone()[0]
+
+
+def create_template(brand_id: int, name: str, spec: dict):
+    if template_count(brand_id) >= MAX_TEMPLATES:
+        return None
+    with _conn() as c:
+        sort = c.execute("SELECT COALESCE(MAX(sort),0)+1 FROM templates WHERE brand_id=?", (brand_id,)).fetchone()[0]
+        cur = c.execute("INSERT INTO templates (brand_id, name, spec, sort, updated_at) VALUES (?,?,?,?,?)",
+                        (brand_id, name[:40], json.dumps(spec, ensure_ascii=False), sort, _now().isoformat()))
+        return cur.lastrowid
+
+
+def update_template(brand_id: int, tid: int, name: str, spec: dict) -> bool:
+    with _conn() as c:
+        cur = c.execute("UPDATE templates SET name=?, spec=?, updated_at=? WHERE id=? AND brand_id=?",
+                        (name[:40], json.dumps(spec, ensure_ascii=False), _now().isoformat(), tid, brand_id))
+        return cur.rowcount == 1
+
+
+def delete_template(brand_id: int, tid: int) -> bool:
+    with _conn() as c:
+        return c.execute("DELETE FROM templates WHERE id=? AND brand_id=?", (tid, brand_id)).rowcount == 1

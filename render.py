@@ -1,12 +1,28 @@
-"""NUMBUS Branding — движок рендера.
+"""NUMBUS Branding — движок рендера v2 (слои).
 
-Логика перенесена из ÖMANKÖ Post Creator, но все «зашитые» параметры
-(логотип, шрифт, угол, размер, цвет) теперь приходят из бренд-кита клиента.
-Геометрия задаётся в опорных единицах канваса шириной 1920px и масштабируется.
+Шаблон клиента — это JSON со списком слоёв: логотип, текст, фигура, градиент,
+затемнение. Движок ничего не знает о конкретном стиле — стиль целиком задаёт
+клиент в редакторе (Mini App). Редактор рисует превью на <canvas> по тем же
+правилам (webapp.html → renderSurface), поэтому превью совпадает с итогом.
+
+ЕДИНИЦЫ. Все координаты и размеры — доли ШИРИНЫ канваса (W). Так шаблон
+одинаково ложится на 4:5, 1:1 и любой другой формат.
+
+ЯКОРЬ. Двухбуквенный: вертикаль t/m/b + горизонталь l/c/r ("bl", "mc"…).
+  l: левый край слоя = x·W      r: правый край = W − x·W     c: центр = W/2 + x·W
+  t: верх = y·W                 b: низ = H − y·W             m: центр = H/2 + y·W
+
+ТЕКСТ. Блок строк: высота = capH + (n−1)·leading·size. Верх блока — линия
+высоты прописных первой строки, низ — базовая линия последней. То есть
+«снизу» текст стоит на базовой линии, как в вёрстке.
+
+ЦВЕТ. {"mode":"fixed","value":"#RRGGBB"|"p0".."p4"} — фиксированный или из палитры;
+{"mode":"adaptive"} — тон фона ±45% (светлее на тёмном, темнее на светлом);
+{"mode":"contrast","light":..,"dark":..} — светлый на тёмном фоне, тёмный на светлом;
+{"mode":"original"} — только для логотипа: цвета файла.
 """
 import io
 import os
-import math
 import hashlib
 import logging
 
@@ -14,39 +30,45 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
 
 try:
-    import pillow_avif  # noqa: F401 — AVIF-декодер
+    import pillow_avif  # noqa: F401
 except Exception:
     pass
 try:
     import pillow_heif
-    pillow_heif.register_heif_opener()  # HEIC с айфонов, присланные файлом
+    pillow_heif.register_heif_opener()
 except Exception:
     pass
 
 logger = logging.getLogger(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(BASE, "fonts")
-REF_W = 1920
 
-# ============ Шрифты ============
-# tag — вес для хештега, head — вес заголовка обложки,
-# ls — трекинг заголовка в ленте (в сторис вдвое плотнее), scale — поправка
-# кегля для широких гарнитур.
+# ============ Каталог шрифтов (все с кириллицей и осью веса) ============
 FONTS = {
-    "nunito":     dict(label="Nunito",     file="Nunito.ttf",          tag=600, head=900, ls=-0.03, scale=1.00),
-    "inter":      dict(label="Inter",      file="Inter.ttf",           tag=500, head=800, ls=-0.04, scale=1.00),
-    "manrope":    dict(label="Manrope",    file="Manrope.ttf",         tag=600, head=800, ls=-0.03, scale=1.00),
-    "montserrat": dict(label="Montserrat", file="Montserrat.ttf",      tag=600, head=800, ls=-0.03, scale=0.95),
-    "unbounded":  dict(label="Unbounded",  file="Unbounded.ttf",       tag=500, head=700, ls=-0.03, scale=0.80),
-    "playfair":   dict(label="Playfair",   file="PlayfairDisplay.ttf", tag=500, head=800, ls=-0.01, scale=1.05),
+    "inter":      dict(label="Inter",              file="Inter.ttf",              min=100, max=900, group="sans"),
+    "onest":      dict(label="Onest",              file="Onest.ttf",              min=100, max=900, group="sans"),
+    "golos":      dict(label="Golos",              file="GolosText.ttf",          min=400, max=900, group="sans"),
+    "manrope":    dict(label="Manrope",            file="Manrope.ttf",            min=200, max=800, group="sans"),
+    "geologica":  dict(label="Geologica",          file="Geologica.ttf",          min=100, max=900, group="sans"),
+    "montserrat": dict(label="Montserrat",         file="Montserrat.ttf",         min=100, max=900, group="sans"),
+    "jost":       dict(label="Jost",               file="Jost.ttf",               min=100, max=900, group="sans"),
+    "rubik":      dict(label="Rubik",              file="Rubik.ttf",              min=300, max=900, group="sans"),
+    "nunito":     dict(label="Nunito",             file="Nunito.ttf",             min=200, max=1000, group="round"),
+    "comfortaa":  dict(label="Comfortaa",          file="Comfortaa.ttf",          min=300, max=700, group="round"),
+    "unbounded":  dict(label="Unbounded",          file="Unbounded.ttf",          min=200, max=900, group="display"),
+    "oswald":     dict(label="Oswald",             file="Oswald.ttf",             min=200, max=700, group="display"),
+    "playfair":   dict(label="Playfair Display",   file="PlayfairDisplay.ttf",    min=400, max=900, group="serif"),
+    "cormorant":  dict(label="Cormorant Garamond", file="CormorantGaramond.ttf",  min=300, max=700, group="serif"),
+    "lora":       dict(label="Lora",               file="Lora.ttf",               min=400, max=700, group="serif"),
+    "jetbrains":  dict(label="JetBrains Mono",     file="JetBrainsMono.ttf",      min=100, max=800, group="mono"),
 }
-CUSTOM_FONT_SPEC = dict(label="Custom", tag=600, head=900, ls=-0.02, scale=1.00)
-_FALLBACK_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+CUSTOM_FONT_SLOTS = ("font1", "font2", "font3")
+DEFAULT_FONT = "inter"
+_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 _font_cache = {}
 
 
-def _set_weight(font, wght, display=False):
-    """Выставляет вес на вариативном шрифте. Для статичных — тихо ничего."""
+def _apply_axes(font, weight, size):
     try:
         axes = font.get_variation_axes()
     except Exception:
@@ -54,54 +76,48 @@ def _set_weight(font, wght, display=False):
     vals = []
     for a in axes:
         name = a.get("name", b"")
-        if isinstance(name, bytes):
-            name = name.decode("latin-1", "ignore")
-        lo, hi = a.get("minimum", 0), a.get("maximum", 0)
+        name = name.decode("latin-1", "ignore") if isinstance(name, bytes) else str(name)
+        lo, hi, df = a.get("minimum", 0), a.get("maximum", 0), a.get("default", a.get("minimum", 0))
         if "eight" in name:
-            vals.append(max(lo, min(hi, wght)))
+            vals.append(max(lo, min(hi, weight)))
         elif "ptical" in name:
-            vals.append(hi if display else lo)
+            vals.append(max(lo, min(hi, size)))  # как font-optical-sizing:auto в браузере
         else:
-            vals.append(a.get("default", lo))
+            vals.append(df)
     try:
         font.set_variation_by_axes(vals)
     except Exception as e:
-        logger.warning("Не смог выставить вес шрифта: %s", e)
+        logger.warning("variation: %s", e)
 
 
-def font_spec(kit) -> dict:
-    return FONTS.get(kit.get("font"), CUSTOM_FONT_SPEC if kit.get("font") == "custom" else FONTS["nunito"])
-
-
-def get_font(kit, custom_font: bytes, role: str, size: float):
-    """role: 'tag' | 'head'."""
-    spec = font_spec(kit)
-    wght = spec[role]
-    size = max(1, round(size))
-    if kit.get("font") == "custom" and custom_font:
-        key = ("custom", hashlib.md5(custom_font).hexdigest(), role, size)
-        if key not in _font_cache:
+def get_font(key, weight, size, customs=None):
+    """key — ключ каталога или слот своего шрифта (font1..font3)."""
+    size = max(1.0, round(float(size) * 2) / 2)
+    weight = int(weight or 400)
+    if key in CUSTOM_FONT_SLOTS and customs and customs.get(key):
+        data = customs[key]
+        ck = ("c", hashlib.md5(data).hexdigest(), weight, size)
+        if ck not in _font_cache:
             try:
-                f = ImageFont.truetype(io.BytesIO(custom_font), size)
-                _set_weight(f, wght, display=(role == "head"))
-                _font_cache[key] = f
+                f = ImageFont.truetype(io.BytesIO(data), size)
+                _apply_axes(f, weight, size)
+                _font_cache[ck] = f
             except Exception as e:
-                logger.error("Свой шрифт не открылся (%s) — фолбэк Nunito", e)
-                return get_font(dict(kit, font="nunito"), None, role, size)
-        return _font_cache[key]
-    fkey = kit.get("font") if kit.get("font") in FONTS else "nunito"
-    key = (fkey, role, size)
-    if key not in _font_cache:
-        path = os.path.join(FONT_DIR, FONTS[fkey]["file"])
+                logger.error("Свой шрифт не открылся: %s", e)
+                return get_font(DEFAULT_FONT, weight, size)
+        return _font_cache[ck]
+    if key not in FONTS:
+        key = DEFAULT_FONT
+    ck = (key, weight, size)
+    if ck not in _font_cache:
         try:
-            f = ImageFont.truetype(path, size)
-            _set_weight(f, wght, display=(role == "head"))
+            f = ImageFont.truetype(os.path.join(FONT_DIR, FONTS[key]["file"]), size)
+            _apply_axes(f, weight, size)
         except Exception as e:
-            logger.error("Шрифт %s не найден (%s) — системный фолбэк", path, e)
-            f = ImageFont.truetype(_FALLBACK_FONT, size) if os.path.exists(_FALLBACK_FONT) \
-                else ImageFont.load_default()
-        _font_cache[key] = f
-    return _font_cache[key]
+            logger.error("Шрифт %s: %s — фолбэк", key, e)
+            f = ImageFont.truetype(_FALLBACK, size) if os.path.exists(_FALLBACK) else ImageFont.load_default()
+        _font_cache[ck] = f
+    return _font_cache[ck]
 
 
 def validate_font(data: bytes) -> bool:
@@ -113,11 +129,17 @@ def validate_font(data: bytes) -> bool:
         return False
 
 
+def font_name(data: bytes, fallback: str) -> str:
+    try:
+        fam, style = ImageFont.truetype(io.BytesIO(data), 20).getname()
+        return (fam or fallback)[:40]
+    except Exception:
+        return fallback
+
+
 # ============ Картинки ============
 def open_image(data: bytes) -> Image.Image:
-    img = Image.open(io.BytesIO(data))
-    img = ImageOps.exif_transpose(img)  # фото с телефона не должны лечь боком
-    return img
+    return ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
 
 
 def open_photo(data: bytes) -> Image.Image:
@@ -125,12 +147,9 @@ def open_photo(data: bytes) -> Image.Image:
 
 
 def prepare_logo(data: bytes):
-    """Готовит логотип клиента: RGBA, обрезан по видимой части.
-
-    Если прозрачности нет (JPG или PNG на фоне), фон определяется по углам,
-    а альфа строится из контраста с ним — так работают и «чёрный на белом»,
-    и «белый на чёрном». Возвращает (png_bytes, had_alpha).
-    """
+    """RGBA-логотип, обрезанный по видимой части. Если прозрачности нет —
+    фон определяется по углам, альфа строится из контраста с ним.
+    Возвращает (png_bytes, had_alpha)."""
     img = open_image(data).convert("RGBA")
     if max(img.size) > 3000:
         img.thumbnail((3000, 3000), Image.LANCZOS)
@@ -138,14 +157,12 @@ def prepare_logo(data: bytes):
     alpha = arr[:, :, 3]
     had_alpha = bool((alpha < 10).mean() > 0.01)
     if not had_alpha:
-        rgb = arr[:, :, :3].astype(np.float32)
-        gray = rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+        gray = arr[:, :, :3].astype(np.float32) @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
         h, w = gray.shape
         k = max(2, int(min(h, w) * 0.05))
         corners = np.concatenate([gray[:k, :k].ravel(), gray[:k, -k:].ravel(),
                                   gray[-k:, :k].ravel(), gray[-k:, -k:].ravel()])
-        bg = float(np.median(corners))
-        diff = np.abs(gray - bg)
+        diff = np.abs(gray - float(np.median(corners)))
         top = float(np.percentile(diff, 99.5)) or 1.0
         a = np.clip(diff / top * 255.0, 0, 255)
         a[a < 18] = 0
@@ -155,265 +172,158 @@ def prepare_logo(data: bytes):
     if not mask.any():
         raise ValueError("empty logo")
     ys, xs = np.where(mask)
-    arr = arr[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
-    out = Image.fromarray(arr, "RGBA")
+    out = Image.fromarray(arr[ys.min():ys.max() + 1, xs.min():xs.max() + 1], "RGBA")
     buf = io.BytesIO()
     out.save(buf, format="PNG")
     return buf.getvalue(), had_alpha
 
 
 def sample_image(w=1600, h=2000) -> Image.Image:
-    """Нейтральный фон для превью, если клиент не прислал своё фото:
-    светлое небо сверху, тёмная земля снизу — видно, как работает адаптивный цвет."""
+    """Нейтральный фон для превью: светлый верх, тёмный низ."""
     y = np.linspace(0, 1, h).reshape(-1, 1)
     x = np.linspace(0, 1, w).reshape(1, -1)
-    top = np.array([214, 222, 230], dtype=np.float32)
-    mid = np.array([198, 170, 150], dtype=np.float32)
-    low = np.array([40, 42, 48], dtype=np.float32)
+    top, mid, low = (np.array(c, dtype=np.float32) for c in ([214, 222, 230], [198, 170, 150], [40, 42, 48]))
     t = np.clip(y * 1.4, 0, 1)[..., None]
     col = top * (1 - t) + mid * t
     t2 = np.clip((y - 0.62) * 3.2, 0, 1)[..., None]
-    col = col * (1 - t2) + low * t2
-    col = col + (x[..., None] - 0.5) * 18
-    rng = np.random.default_rng(7)
-    col = col + rng.normal(0, 3.5, (h, w, 1))
+    col = col * (1 - t2) + low * t2 + (x[..., None] - 0.5) * 18
+    col = col + np.random.default_rng(7).normal(0, 3.5, (h, w, 1))
     img = Image.fromarray(np.clip(np.broadcast_to(col, (h, w, 3)), 0, 255).astype(np.uint8), "RGB")
     sun = Image.new("L", (w, h), 0)
     ImageDraw.Draw(sun).ellipse((w * 0.58, h * 0.18, w * 0.80, h * 0.36), fill=200)
-    sun = sun.filter(ImageFilter.GaussianBlur(w * 0.03))
-    img = Image.composite(Image.new("RGB", (w, h), (255, 240, 220)), img, sun)
-    return img
+    return Image.composite(Image.new("RGB", (w, h), (255, 240, 220)), img,
+                           sun.filter(ImageFilter.GaussianBlur(w * 0.03)))
 
 
-# ============ Общие утилиты (из ÖMANKÖ) ============
-BRIGHTNESS_OFFSET = 45
-ALPHA = 0.95
+def fit_cover(img, cw, ch):
+    ir, cr = img.width / img.height, cw / ch
+    if ir > cr:
+        dh, dw = ch, int(round(ch * ir))
+    else:
+        dw, dh = cw, int(round(cw / ir))
+    x0, y0 = (dw - cw) // 2, (dh - ch) // 2
+    return img.resize((dw, dh), Image.LANCZOS).crop((x0, y0, x0 + cw, y0 + ch))
 
 
-def get_average_color(img, x, y, w, h):
-    x, y = max(0, int(x)), max(0, int(y))
-    x2, y2 = min(int(x + w), img.width), min(int(y + h), img.height)
-    if x2 <= x or y2 <= y:
+# ============ Цвет ============
+def hex_rgb(s, default=(255, 255, 255)):
+    try:
+        s = s.lstrip("#")
+        return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+    except Exception:
+        return default
+
+
+def avg_color(img, box):
+    x, y, w, h = box
+    x0, y0 = max(0, int(x)), max(0, int(y))
+    x1, y1 = min(int(x + w), img.width), min(int(y + h), img.height)
+    if x1 <= x0 or y1 <= y0:
         return 0.0, 0.0, 0.0
-    arr = np.array(img.crop((x, y, x2, y2)).convert("RGB")).reshape(-1, 3).mean(axis=0)
-    return float(arr[0]), float(arr[1]), float(arr[2])
+    a = np.asarray(img.crop((x0, y0, x1, y1)).convert("RGB"), dtype=np.float32).reshape(-1, 3).mean(axis=0)
+    return float(a[0]), float(a[1]), float(a[2])
 
 
-def brightness_of(r, g, b):
+def luma(r, g, b):
     return (r * 299 + g * 587 + b * 114) / 1000
 
 
-def adjust_brightness(r, g, b, percent):
-    if percent > 0:
-        r, g, b = (c + (255 - c) * percent / 100 for c in (r, g, b))
+def shift_tone(r, g, b, pct):
+    if pct > 0:
+        r, g, b = (c + (255 - c) * pct / 100 for c in (r, g, b))
     else:
-        p = abs(percent)
-        r, g, b = (c - c * p / 100 for c in (r, g, b))
-    return int(min(255, max(0, r))), int(min(255, max(0, g))), int(min(255, max(0, b)))
+        r, g, b = (c - c * (-pct) / 100 for c in (r, g, b))
+    return tuple(int(min(255, max(0, round(c)))) for c in (r, g, b))
 
 
-def adaptive_color(canvas, box):
-    x, y, w, h = box
-    r, g, b = get_average_color(canvas, x, y, w, h)
-    pct = BRIGHTNESS_OFFSET if brightness_of(r, g, b) < 128 else -BRIGHTNESS_OFFSET
-    return adjust_brightness(r, g, b, pct)
+class Ctx:
+    """Всё, что нужно слоям: палитра, логотипы, свои шрифты, значения полей."""
+
+    def __init__(self, palette=None, logos=None, customs=None, fields=None, dark=0.0):
+        self.palette = palette or []
+        self.logos = logos or {}          # {"logo": RGBA Image, "logo_alt": ...}
+        self.customs = customs or {}      # {"font1": bytes, ...}
+        self.fields = fields or {}        # title, subtitle, hashtag, i, n
+        self.dark = float(dark)
+
+    def ref(self, v, default="#FFFFFF"):
+        v = v or default
+        if isinstance(v, str) and len(v) == 2 and v[0] == "p" and v[1].isdigit():
+            idx = int(v[1])
+            v = self.palette[idx] if idx < len(self.palette) else default
+        return hex_rgb(v)
 
 
-def fit_image_to_canvas(img, cw, ch):
-    """Заполнение канваса с центрированием и обрезкой (cover)."""
-    ir, cr = img.width / img.height, cw / ch
-    if ir > cr:
-        dh = ch
-        dw = int(round(dh * ir))
+def resolve_color(spec, ctx, canvas, box):
+    """→ (r,g,b) или None (оригинальные цвета логотипа)."""
+    spec = spec or {"mode": "fixed", "value": "#FFFFFF"}
+    mode = spec.get("mode", "fixed")
+    if mode == "original":
+        return None
+    if mode == "fixed":
+        return ctx.ref(spec.get("value"))
+    r, g, b = avg_color(canvas, box)
+    dark_bg = luma(r, g, b) < 128
+    if mode == "contrast":
+        return ctx.ref(spec.get("light"), "#FFFFFF") if dark_bg else ctx.ref(spec.get("dark"), "#000000")
+    return shift_tone(r, g, b, 45 if dark_bg else -45)  # adaptive
+
+
+# ============ Геометрия ============
+def place(anchor, x, y, w, h, W, H):
+    v, hz = (anchor or "bl")[0], (anchor or "bl")[1]
+    left = x * W if hz == "l" else (W - x * W - w if hz == "r" else W / 2 + x * W - w / 2)
+    top = y * W if v == "t" else (H - y * W - h if v == "b" else H / 2 + y * W - h / 2)
+    return left, top
+
+
+def _rounded_layer(size, box, radius, fill, stroke=0):
+    lay = Image.new("RGBA", size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(lay)
+    x0, y0, x1, y1 = box
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return lay
+    r = max(0, min(radius, (x1 - x0) / 2, (y1 - y0) / 2))
+    if stroke > 0:
+        d.rounded_rectangle(box, radius=r, outline=fill, width=max(1, int(round(stroke))))
     else:
-        dw = cw
-        dh = int(round(dw / ir))
-    resized = img.resize((dw, dh), Image.LANCZOS)
-    return resized.crop(((dw - cw) // 2, (dh - ch) // 2, (dw - cw) // 2 + cw, (dh - ch) // 2 + ch))
+        d.rounded_rectangle(box, radius=r, fill=fill)
+    return lay
 
 
-def tint(logo: Image.Image, color, alpha=ALPHA):
-    """Силуэт логотипа, залитый цветом color (альфа-края сохраняются)."""
-    solid = Image.new("RGBA", logo.size, (int(color[0]), int(color[1]), int(color[2]), 0))
-    solid.putalpha(logo.split()[3].point(lambda p: int(p * alpha)))
-    return solid
+# ============ Текст ============
+def apply_case(s, case):
+    return s.upper() if case == "upper" else (s.lower() if case == "lower" else s)
 
 
-def fit_box(ratio, max_w, max_h):
-    """Размер лого с пропорцией ratio (w/h), вписанного в max_w×max_h."""
-    w = max_w
-    h = w / ratio
-    if h > max_h:
-        h = max_h
-        w = h * ratio
-    return max(1, round(w)), max(1, round(h))
+def text_content(L, ctx):
+    src = L.get("source", "static")
+    f = ctx.fields
+    if src == "title":
+        s = f.get("title") or ""
+    elif src == "subtitle":
+        s = f.get("subtitle") or ""
+    elif src == "hashtag":
+        s = f.get("hashtag") or ""
+    elif src == "counter":
+        n = f.get("n") or 0
+        s = (L.get("text") or "{i} / {n}").replace("{i}", str(f.get("i", 1))).replace("{n}", str(n)) if n else ""
+    else:
+        s = L.get("text") or ""
+    return apply_case(s, L.get("case", "none"))
 
 
-def draw_tracked(draw, xy, text, font, fill, ls_px):
-    """Строка с трекингом. Позиции считаем по префиксам — кернинг не теряется."""
-    x0, y = xy
-    for i, c in enumerate(text):
-        x = x0 + draw.textlength(text[:i], font=font) + ls_px * i
-        draw.text((x, y), c, font=font, fill=fill)
+def tracked_w(font, s, ls):
+    return font.getlength(s) + ls * (len(s) - 1) if s else 0.0
 
 
-def tracked_width(draw, text, font, ls_px):
-    if not text:
-        return 0
-    return draw.textlength(text, font=font) + ls_px * (len(text) - 1)
-
-
-# ============ Бренд-контекст ============
-class Brand:
-    """Всё, что нужно рендеру: кит + открытые ассеты."""
-
-    def __init__(self, kit: dict, logo_png: bytes, cover_logo_png: bytes = None, font: bytes = None):
-        self.kit = kit
-        self.logo = Image.open(io.BytesIO(logo_png)).convert("RGBA") if logo_png else None
-        self.cover_logo = Image.open(io.BytesIO(cover_logo_png)).convert("RGBA") if cover_logo_png else self.logo
-        self.font = font
-
-    def f(self, role, size):
-        return get_font(self.kit, self.font, role, size)
-
-
-# ============ БРЕНДИНГ ============
-FORMATS = {
-    "4:5":  (1920, 2400),
-    "3:4":  (1920, 2560),
-    "1:1":  (1920, 1920),
-    "9:16": (1080, 1920),
-    "3:2":  (1920, 1280),
-    "orig": None,
-}
-SIZE_AREA = {"s": 4000, "m": 7000, "l": 12000}    # «визуальный вес» лого, px² на 1920
-SIZE_MAX_H = {"s": 80, "m": 105, "l": 140}
-SIZE_MAX_W = {"s": 300, "m": 380, "l": 480}
-TAG_SIZE = {"s": 44, "m": 51, "l": 60}
-MARGIN_X = 90
-MARGIN_Y = 72
-
-
-def canvas_size(img, fmt_key):
-    fmt = FORMATS.get(fmt_key)
-    if fmt:
-        return fmt
-    w, h = img.size
-    target = min(max(w, 1920), 2560)
-    return target, int(round(h * target / w))
-
-
-def logo_size(ratio, size_key, scale):
-    area = SIZE_AREA[size_key]
-    w = math.sqrt(area * ratio)
-    h = math.sqrt(area / ratio)
-    k = min(1.0, SIZE_MAX_H[size_key] / h, SIZE_MAX_W[size_key] / w)
-    return max(1, round(w * k * scale)), max(1, round(h * k * scale))
-
-
-def render_branding(img: Image.Image, fmt_key: str, hashtag: str, brand: Brand) -> Image.Image:
-    kit = brand.kit
-    cw, ch = canvas_size(img, fmt_key)
-    s = cw / REF_W
-    canvas = fit_image_to_canvas(img, cw, ch).convert("RGBA")
-    pos, size = kit.get("pos", "bl"), kit.get("size", "m")
-    mode = kit.get("color", "adaptive")
-    mx, my = round(MARGIN_X * s), round(MARGIN_Y * s)
-
-    # --- Лого ---
-    lw = lh = 0
-    lx = mx
-    ly = ch - my
-    if brand.logo is not None:
-        lw, lh = logo_size(brand.logo.width / brand.logo.height, size, s)
-        lx = mx if pos[1] == "l" else cw - mx - lw
-        ly = ch - my - lh if pos[0] == "b" else my
-        logo = brand.logo.resize((lw, lh), Image.LANCZOS)
-        if mode == "original":
-            canvas.alpha_composite(logo, (lx, ly))
-        else:
-            color = {"white": (255, 255, 255), "black": (0, 0, 0)}.get(mode) or \
-                adaptive_color(canvas, (lx, ly, lw, lh))
-            canvas.alpha_composite(tint(logo, color), (lx, ly))
-
-    # --- Хештег: противоположный угол той же строки, центр по оси лого ---
-    if hashtag:
-        font = brand.f("tag", TAG_SIZE[size] * s)
-        d = ImageDraw.Draw(canvas)
-        bb = d.textbbox((0, 0), hashtag, font=font)
-        tw, th = bb[2] - bb[0], bb[3] - bb[1]
-        axis = (ly + lh / 2) if lh else (ch - my - th / 2 if pos[0] == "b" else my + th / 2)
-        tx = cw - mx - tw if pos[1] == "l" else mx
-        ty = axis - th / 2
-        if mode in ("white", "black"):
-            color = (255, 255, 255) if mode == "white" else (0, 0, 0)
-        else:
-            color = adaptive_color(canvas, (tx, ty - 10 * s, tw, th + 20 * s))
-        d.text((tx - bb[0], ty - bb[1]), hashtag, font=font,
-               fill=(color[0], color[1], color[2], int(255 * ALPHA)))
-
-    return canvas.convert("RGB")
-
-
-# ============ ОБЛОЖКА ============
-COVER_FORMATS = {
-    "4:5":  dict(size=(1920, 2400), title=135, title_bottom=365),
-    "3:4":  dict(size=(1920, 2560), title=135, title_bottom=385),
-    "1:1":  dict(size=(1920, 1920), title=120, title_bottom=330),
-    "3:2":  dict(size=(1920, 1280), title=110, title_bottom=250),
-    "orig": dict(size=None, title=135, title_bottom=365),
-}
-BUBBLE_H = 126
-BUBBLE_TOP = 68
-BUBBLE_PAD_X = 48
-BUBBLE_TEXT = 51
-BUBBLE_ALPHA = 0.85
-FEED_LOGO_BOX = (326, 90)       # лого внизу ленты вписывается в этот бокс
-FEED_LOGO_BOTTOM = 65
-LINE_SPACING = 1.08
-TITLE_MAX_W = 0.88              # заголовок не шире 88% канваса
-
-STORY_SIZE = (1080, 1920)
-STORY_TITLE = 77
-STORY_LOGO_BOX = (200, 81)
-STORY_LOGO_TOP = 168
-STORY_GRAD_RISE = 900
-STORY_VARIANTS = {
-    # плашка-пустышка под стикер-ссылку; цвет инвертный к фону
-    "ig": dict(title_bottom=452, b_w=387, b_h=135, b_r=41, b_bottom=215),
-    "tg": dict(title_bottom=382, b_w=430, b_h=115, b_r=17, b_bottom=161),
-}
-STORY_BUBBLE_ALPHA = 0.50
-
-GRAD_ALPHA_DARK = 0.18
-GRAD_ALPHA_LIGHT = 0.62
-GRAD_ALPHA_CEIL = 0.99
-DARK_LEVELS = [0.4, 0.7, 1.0, 1.4, 1.8]
-DARK_DEFAULT_IDX = 2
-
-
-def apply_bottom_gradient(canvas, brightness, rise, dark_level=1.0):
-    """Чёрный градиент снизу: адаптивная база по яркости + ручной сдвиг."""
-    cw, ch = canvas.size
-    t = max(0.0, min(1.0, brightness / 255.0))
-    base_alpha = GRAD_ALPHA_DARK + (GRAD_ALPHA_LIGHT - GRAD_ALPHA_DARK) * t
-    alpha = max(0.0, min(GRAD_ALPHA_CEIL, base_alpha + (dark_level - 1.0)))
-    rise = min(int(rise), ch)
-    mask = np.zeros((ch, cw), dtype=np.uint8)
-    mask[ch - rise:, :] = np.linspace(0, int(255 * alpha), rise).astype(np.uint8).reshape(-1, 1)
-    black = Image.new("RGBA", (cw, ch), (0, 0, 0, 255))
-    return Image.composite(black, canvas.convert("RGBA"), Image.fromarray(mask, "L"))
-
-
-def _wrap_title(draw, text, font, ls_px, max_w):
-    """Переносы пользователя сохраняем; слишком длинные строки дорезаем по словам."""
+def wrap(text, font, ls, maxw):
     out = []
-    for raw in text.split("\n"):
-        words = raw.split(" ")
+    for para in text.split("\n"):
         line = ""
-        for w in words:
-            cand = (line + " " + w).strip() if line else w
-            if line and tracked_width(draw, cand, font, ls_px) > max_w:
+        for w in para.split(" "):
+            cand = w if line == "" else line + " " + w
+            if line != "" and maxw > 0 and tracked_w(font, cand, ls) > maxw:
                 out.append(line)
                 line = w
             else:
@@ -422,103 +332,232 @@ def _wrap_title(draw, text, font, ls_px, max_w):
     return out
 
 
-def draw_title(canvas, text, brand: Brand, size, ls_ratio, bottom_offset):
-    cw, ch = canvas.size
-    d = ImageDraw.Draw(canvas)
-    max_w = cw * TITLE_MAX_W
-    font = brand.f("head", size)
-    lines = _wrap_title(d, text, font, round(size * ls_ratio), max_w)
-    widest = max((tracked_width(d, ln, font, round(size * ls_ratio)) for ln in lines), default=0)
-    if widest > max_w:  # одно слово шире канваса — уменьшаем кегль
-        size = size * max_w / widest
-        font = brand.f("head", size)
-    ls_px = round(size * ls_ratio)
-    ascent, descent = font.getmetrics()
-    line_adv = int(size * LINE_SPACING)
-    last_top = (ch - bottom_offset) - (ascent + descent)
-    first_top = last_top - (len(lines) - 1) * line_adv
-    for i, ln in enumerate(lines):
-        w = tracked_width(d, ln, font, ls_px)
-        draw_tracked(d, (cw / 2 - w / 2, first_top + i * line_adv), ln, font, (255, 255, 255, 255), ls_px)
+def layout_text(L, ctx, content, W):
+    """Строки, шрифт и габариты блока. Общая логика с webapp.html → layoutText."""
+    size = float(L.get("size", 0.04)) * W
+    key, weight = L.get("font", DEFAULT_FONT), L.get("weight", 400)
+    font = get_font(key, weight, size, ctx.customs)
+    ls = float(L.get("tracking", 0)) * size
+    maxw = float(L.get("maxw", 0)) * W
+    lines = wrap(content, font, ls, maxw)
+    widest = max((tracked_w(font, ln, ls) for ln in lines), default=0)
+    if maxw > 0 and widest > maxw:  # одно слово шире рамки — уменьшаем кегль
+        size = size * maxw / widest
+        font = get_font(key, weight, size, ctx.customs)
+        ls = float(L.get("tracking", 0)) * size
+        widest = max((tracked_w(font, ln, ls) for ln in lines), default=0)
+    cap = -font.getbbox("H", anchor="ls")[1]
+    adv = float(L.get("leading", 1.1)) * size
+    return dict(lines=lines, font=font, ls=ls, size=size, cap=cap, adv=adv,
+                w=widest, h=cap + (len(lines) - 1) * adv)
 
 
-def _paste_logo_centered(canvas, logo, box, cx, y_top, mode):
-    if logo is None:
+def draw_text_layer(canvas, L, ctx):
+    W, H = canvas.size
+    content = text_content(L, ctx)
+    if not content.strip():
+        return None
+    m = layout_text(L, ctx, content, W)
+    plate = L.get("plate")
+    padx = float(plate.get("padx", 0.8)) * m["size"] if plate else 0
+    pady = float(plate.get("pady", 0.5)) * m["size"] if plate else 0
+    bw, bh = m["w"] + 2 * padx, m["h"] + 2 * pady
+    left, top = place(L.get("anchor", "bl"), float(L.get("x", 0)), float(L.get("y", 0)), bw, bh, W, H)
+    opacity = float(L.get("opacity", 1))
+
+    if plate:
+        pc = resolve_color(plate.get("color"), ctx, canvas, (left, top, bw, bh)) or (0, 0, 0)
+        pa = int(round(255 * float(plate.get("opacity", 1)) * opacity))
+        radius = float(plate.get("radius", 0)) * bh
+        canvas.alpha_composite(_rounded_layer(canvas.size, (left, top, left + bw, top + bh), radius, pc + (pa,)))
+
+    tx, ty = left + padx, top + pady
+    col = resolve_color(L.get("color"), ctx, canvas, (tx, ty, m["w"], m["h"])) or (255, 255, 255)
+    fill = col + (int(round(255 * opacity)),)
+    # Отдельный слой → корректное наложение полупрозрачного текста
+    pad = int(m["size"])
+    lx0, ly0 = int(tx) - pad, int(ty) - pad
+    lay = Image.new("RGBA", (int(m["w"]) + 2 * pad + 2, int(m["h"]) + 2 * pad + 2), (0, 0, 0, 0))
+    d = ImageDraw.Draw(lay)
+    align = L.get("align", "left")
+    font, ls = m["font"], m["ls"]
+    for i, ln in enumerate(m["lines"]):
+        lw = tracked_w(font, ln, ls)
+        off = 0 if align == "left" else ((m["w"] - lw) / 2 if align == "center" else m["w"] - lw)
+        bx = tx + off - lx0
+        by = ty + m["cap"] + i * m["adv"] - ly0
+        if ls == 0:
+            d.text((bx, by), ln, font=font, fill=fill, anchor="ls")
+        else:
+            for k, ch in enumerate(ln):
+                d.text((bx + font.getlength(ln[:k]) + ls * k, by), ch, font=font, fill=fill, anchor="ls")
+    over(canvas, lay, lx0, ly0)
+    return (left, top, bw, bh)
+
+
+def over(canvas, lay, x, y):
+    """alpha_composite с обрезкой по краям канваса (слой может выходить за край)."""
+    x, y = int(x), int(y)
+    sx0, sy0 = max(0, -x), max(0, -y)
+    dx0, dy0 = max(0, x), max(0, y)
+    w = min(lay.width - sx0, canvas.width - dx0)
+    h = min(lay.height - sy0, canvas.height - dy0)
+    if w <= 0 or h <= 0:
         return
-    lw, lh = fit_box(logo.width / logo.height, *box)
-    rs = logo.resize((lw, lh), Image.LANCZOS)
-    if mode != "original":
-        rs = tint(rs, (255, 255, 255), 1.0)  # на обложке поверх градиента — всегда белый
-    canvas.alpha_composite(rs, (int(cx - lw / 2), int(y_top)))
+    canvas.alpha_composite(lay.crop((sx0, sy0, sx0 + w, sy0 + h)), (dx0, dy0))
 
 
-def render_cover_feed(img, fmt_key, title, hashtag, brand: Brand, dark_level=1.0):
-    spec = COVER_FORMATS.get(fmt_key, COVER_FORMATS["4:5"])
-    if spec["size"]:
-        cw, ch = spec["size"]
+# ============ Остальные слои ============
+def tint(logo, color, alpha):
+    solid = Image.new("RGBA", logo.size, color + (0,))
+    solid.putalpha(logo.split()[3].point(lambda p: int(round(p * alpha))))
+    return solid
+
+
+def draw_logo_layer(canvas, L, ctx):
+    W, H = canvas.size
+    logo = ctx.logos.get(L.get("asset", "logo")) or ctx.logos.get("logo")
+    if logo is None:
+        return None
+    w = max(1, int(round(float(L.get("w", 0.08)) * W)))
+    h = max(1, int(round(w * logo.height / logo.width)))
+    left, top = place(L.get("anchor", "bl"), float(L.get("x", 0)), float(L.get("y", 0)), w, h, W, H)
+    left, top = int(round(left)), int(round(top))
+    rs = logo.resize((w, h), Image.LANCZOS)
+    opacity = float(L.get("opacity", 1))
+    col = resolve_color(L.get("color"), ctx, canvas, (left, top, w, h))
+    if col is None:
+        a = rs.split()[3].point(lambda p: int(round(p * opacity)))
+        rs.putalpha(a)
+        piece = rs
     else:
-        cw, ch = canvas_size(img, "orig")
-    s = cw / REF_W
-    fs = font_spec(brand.kit)
-    title_size = spec["title"] * fs["scale"] * s
-    title_bottom = spec["title_bottom"] * s
+        piece = tint(rs, col, opacity)
+    over(canvas, piece, left, top)
+    return (left, top, w, h)
 
-    base = fit_image_to_canvas(img, cw, ch)
-    ry = max(0, ch - title_bottom - title_size * 2)
-    br = brightness_of(*get_average_color(base, 0, ry, cw, title_size * 2))
-    canvas = apply_bottom_gradient(base, br, min(ch, title_bottom + title_size * 4), dark_level)
 
-    draw_title(canvas, title, brand, title_size, fs["ls"], title_bottom)
+def rect_box(L, W, H):
+    if L.get("fit") == "inset":
+        m = float(L.get("m", 0.04)) * W
+        return m, m, W - 2 * m, H - 2 * m
+    w, h = float(L.get("w", 0.2)) * W, float(L.get("h", 0.1)) * W
+    left, top = place(L.get("anchor", "mc"), float(L.get("x", 0)), float(L.get("y", 0)), w, h, W, H)
+    return left, top, w, h
 
-    if hashtag:
-        font = brand.f("tag", BUBBLE_TEXT * s)
-        d = ImageDraw.Draw(canvas)
-        label = "# " + hashtag.lstrip("#")
-        tw = d.textlength(label, font=font)
-        bh = round(BUBBLE_H * s)
-        bw = int(tw + 2 * BUBBLE_PAD_X * s)
-        left, top = int(cw / 2 - bw / 2), round(BUBBLE_TOP * s)
-        layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-        ImageDraw.Draw(layer).rounded_rectangle((left, top, left + bw, top + bh), radius=bh // 2,
-                                                fill=(0, 0, 0, int(255 * BUBBLE_ALPHA)))
-        canvas.alpha_composite(layer)
-        d = ImageDraw.Draw(canvas)
-        bb = d.textbbox((0, 0), label, font=font)
-        d.text((cw / 2 - tw / 2, top + bh / 2 - (bb[3] - bb[1]) / 2 - bb[1]), label,
-               font=font, fill=(255, 255, 255, 255))
 
-    logo = brand.cover_logo
-    if logo is not None:
-        lw, lh = fit_box(logo.width / logo.height, FEED_LOGO_BOX[0] * s, FEED_LOGO_BOX[1] * s)
-        _paste_logo_centered(canvas, logo, (FEED_LOGO_BOX[0] * s, FEED_LOGO_BOX[1] * s),
-                             cw / 2, ch - FEED_LOGO_BOTTOM * s - lh, brand.kit.get("color"))
+def draw_rect_layer(canvas, L, ctx):
+    W, H = canvas.size
+    left, top, w, h = rect_box(L, W, H)
+    col = resolve_color(L.get("color"), ctx, canvas, (left, top, w, h)) or (0, 0, 0)
+    a = int(round(255 * float(L.get("opacity", 1))))
+    radius = float(L.get("radius", 0)) * min(w, h) / 2
+    stroke = float(L.get("stroke", 0)) * W
+    canvas.alpha_composite(_rounded_layer(canvas.size, (left, top, left + w, top + h), radius, col + (a,), stroke))
+    return (left, top, w, h)
+
+
+def draw_gradient_layer(canvas, L, ctx):
+    W, H = canvas.size
+    side = L.get("side", "bottom")
+    vertical = side in ("bottom", "top")
+    ext = int(round(float(L.get("extent", 0.4)) * (H if vertical else W)))
+    ext = max(1, min(ext, H if vertical else W))
+    zone = {"bottom": (0, H - ext, W, ext), "top": (0, 0, W, ext),
+            "left": (0, 0, ext, H), "right": (W - ext, 0, ext, H)}[side]
+    alpha = float(L.get("opacity", 0.6))
+    if L.get("adaptive"):
+        alpha *= 0.4 + 0.6 * luma(*avg_color(canvas, zone)) / 255
+    alpha = max(0.0, min(0.99, alpha + ctx.dark))
+    ramp = np.linspace(0, 255 * alpha, ext, dtype=np.float32)
+    if side in ("top", "left"):
+        ramp = ramp[::-1]
+    mask = np.zeros((H, W), dtype=np.float32)
+    if side == "bottom":
+        mask[H - ext:, :] = ramp[:, None]
+    elif side == "top":
+        mask[:ext, :] = ramp[:, None]
+    elif side == "left":
+        mask[:, :ext] = ramp[None, :]
+    else:
+        mask[:, W - ext:] = ramp[None, :]
+    col = resolve_color(L.get("color"), ctx, canvas, zone) or (0, 0, 0)
+    solid = Image.new("RGBA", (W, H), col + (0,))
+    solid.putalpha(Image.fromarray(np.round(mask).astype(np.uint8), "L"))
+    canvas.alpha_composite(solid)
+    return zone
+
+
+def draw_overlay_layer(canvas, L, ctx):
+    W, H = canvas.size
+    col = resolve_color(L.get("color"), ctx, canvas, (0, 0, W, H)) or (0, 0, 0)
+    a = max(0.0, min(0.99, float(L.get("opacity", 0.2)) + ctx.dark * 0.5))
+    canvas.alpha_composite(Image.new("RGBA", (W, H), col + (int(round(255 * a)),)))
+    return (0, 0, W, H)
+
+
+DRAW = {"text": draw_text_layer, "logo": draw_logo_layer, "rect": draw_rect_layer,
+        "gradient": draw_gradient_layer, "overlay": draw_overlay_layer}
+
+
+def render_surface(photo, W, H, layers, ctx) -> Image.Image:
+    canvas = fit_cover(photo, W, H).convert("RGBA")
+    for L in layers or []:
+        if L.get("hidden"):
+            continue
+        fn = DRAW.get(L.get("type"))
+        if fn:
+            try:
+                fn(canvas, L, ctx)
+            except Exception as e:
+                logger.exception("слой %s: %s", L.get("type"), e)
     return canvas.convert("RGB")
 
 
-def render_cover_story(img, variant, title, brand: Brand, dark_level=1.0):
-    v = STORY_VARIANTS[variant]
-    cw, ch = STORY_SIZE
-    fs = font_spec(brand.kit)
-    tsize = STORY_TITLE * fs["scale"]
-    base = fit_image_to_canvas(img, cw, ch)
-    ry = max(0, ch - v["title_bottom"] - tsize * 2)
-    br = brightness_of(*get_average_color(base, 0, ry, cw, tsize * 2))
-    canvas = apply_bottom_gradient(base, br, STORY_GRAD_RISE, dark_level)
+# ============ Форматы и шаблоны ============
+FEED_SIZES = {
+    "4:5": (1920, 2400), "3:4": (1920, 2560), "1:1": (1920, 1920),
+    "3:2": (1920, 1280), "9:16": (1080, 1920),
+}
+STORY_SIZE = (1080, 1920)
+DARK_STEPS = [-0.4, -0.2, 0.0, 0.2, 0.4]
+DARK_DEFAULT_IDX = 2
 
-    _paste_logo_centered(canvas, brand.cover_logo, STORY_LOGO_BOX, cw / 2, STORY_LOGO_TOP,
-                         brand.kit.get("color"))
-    draw_title(canvas, title, brand, tsize, fs["ls"] * 2, v["title_bottom"])
 
-    # Пустая плашка под стикер-ссылку: тёмный фон → светлая, светлый → тёмная
-    b_w, b_h = v["b_w"], v["b_h"]
-    left, top = int(cw / 2 - b_w / 2), ch - v["b_bottom"] - b_h
-    dark_bg = brightness_of(*get_average_color(canvas, left, top, b_w, b_h)) < 128
-    rgb = (255, 255, 255) if dark_bg else (0, 0, 0)
-    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-    ImageDraw.Draw(layer).rounded_rectangle((left, top, left + b_w, top + b_h), radius=v["b_r"],
-                                            fill=rgb + (int(255 * STORY_BUBBLE_ALPHA),))
-    canvas.alpha_composite(layer)
-    return canvas.convert("RGB")
+def feed_size(img, fmt):
+    if fmt in FEED_SIZES:
+        return FEED_SIZES[fmt]
+    w, h = img.size
+    tw = min(max(w, 1920), 2560)
+    return tw, int(round(h * tw / w))
+
+
+def spec_fields(spec) -> set:
+    """Какие данные шаблон спросит у пользователя при создании поста."""
+    out = set()
+    surfaces = [spec.get("feed", {})]
+    if spec.get("story", {}).get("enabled"):
+        surfaces.append(spec["story"])
+    for s in surfaces:
+        for L in s.get("layers", []):
+            if L.get("type") == "text" and not L.get("hidden") and L.get("source") in ("title", "subtitle", "hashtag"):
+                out.add(L["source"])
+    return out
+
+
+def spec_has_shade(spec) -> bool:
+    surfaces = [spec.get("feed", {})] + ([spec["story"]] if spec.get("story", {}).get("enabled") else [])
+    return any(L.get("type") in ("gradient", "overlay") and not L.get("hidden")
+               for s in surfaces for L in s.get("layers", []))
+
+
+def render_template(photo, spec, fmt, ctx):
+    """→ [(suffix, Image)]: лента в выбранном формате + сторис, если включены."""
+    W, H = feed_size(photo, fmt)
+    out = [("feed", render_surface(photo, W, H, spec.get("feed", {}).get("layers"), ctx))]
+    st = spec.get("story", {})
+    if st.get("enabled"):
+        out.append(("story", render_surface(photo, *STORY_SIZE, st.get("layers"), ctx)))
+    return out
 
 
 # ============ Вывод ============

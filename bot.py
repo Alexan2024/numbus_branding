@@ -1,20 +1,24 @@
 """NUMBUS Branding — Telegram-бот.
 
-Один бот, много брендов. Клиент активирует инвайт-код, собирает бренд-кит
-(логотип, расположение, цвет, шрифт, хештеги) и дальше делает посты сам.
+Один бот, много брендов. Клиент активирует инвайт-код, загружает логотип и
+собирает собственный стиль в редакторе (Mini App, web.py + webapp.html).
+Посты делаются в чате: шаблон → фото → текст → формат → хештег → готово.
 """
 import io
 import os
 import re
 import html
+import signal
 import asyncio
 import logging
 import warnings
 from datetime import datetime
 
-from telegram import Update, InlineKeyboardButton as Btn, InlineKeyboardMarkup as KB, InputMediaPhoto
+from aiohttp import web as aioweb
+from telegram import (Update, InlineKeyboardButton as Btn, InlineKeyboardMarkup as KB,
+                      InputMediaPhoto, WebAppInfo)
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application, BaseUpdateProcessor, CallbackQueryHandler, CommandHandler,
     ContextTypes, ConversationHandler, MessageHandler, filters,
@@ -24,35 +28,35 @@ from PIL import Image
 
 import db
 import render as R
+import web
 from texts import t as _t
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logger = logging.getLogger("numbus")
 warnings.filterwarnings("ignore", category=PTBUserWarning)
 
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_IDS = {int(x) for x in re.split(r"[,\s]+", os.environ.get("ADMIN_IDS", "")) if x.strip().isdigit()}
 SUPPORT = os.environ.get("SUPPORT_CONTACT", "администратору")
+PORT = int(os.environ.get("PORT", "8080"))
+_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+WEBAPP_URL = (os.environ.get("WEBAPP_URL") or (f"https://{_domain}" if _domain else "")).rstrip("/")
 MAX_BATCH = 30
 RENDER_SEM = asyncio.Semaphore(int(os.environ.get("RENDER_WORKERS", "2")))
 HTML = ParseMode.HTML
 esc = html.escape
 
-(MENU, CODE, K_NAME, K_LOGO, K_SAMPLE, K_LAYOUT, K_FONT, K_FONT_UP, K_TAGS, KIT, K_COVER,
- P_TPL, P_PHOTOS, P_TITLE, P_FORMAT, P_TAG, P_CUSTOM_TAG, P_DARK) = range(18)
+(MENU, CODE, K_NAME, K_LOGO, P_TPL, P_PHOTOS, P_TITLE, P_SUBTITLE,
+ P_FORMAT, P_TAG, P_CUSTOM_TAG, P_DARK) = range(12)
 
-FEED_FORMATS = ["4:5", "3:4", "1:1", "9:16", "3:2", "orig"]
-COVER_FEED_FORMATS = ["4:5", "3:4", "1:1", "3:2", "orig"]
+FORMATS = ["4:5", "3:4", "1:1", "3:2", "9:16", "orig"]
 CODE_RE = r"(?i)^\s*NB-[A-Z0-9]{4}-[A-Z0-9]{4}\s*$"
-POS_ICONS = {"tl": "↖️", "tr": "↗️", "bl": "↙️", "br": "↘️"}
 
 
-# ============ Обработка апдейтов: параллельно между юзерами, по очереди внутри юзера ============
+# ============ Параллельно между юзерами, по очереди внутри юзера ============
 class PerUserProcessor(BaseUpdateProcessor):
-    """Пока один клиент рендерит пачку, остальные не ждут. А апдейты одного
-    пользователя идут строго по порядку — диалог не «разъезжается»."""
-
     def __init__(self, max_concurrent_updates=64):
         super().__init__(max_concurrent_updates)
         self._locks = {}
@@ -62,8 +66,7 @@ class PerUserProcessor(BaseUpdateProcessor):
         if uid is None:
             await coroutine
             return
-        lock = self._locks.setdefault(uid, asyncio.Lock())
-        async with lock:
+        async with self._locks.setdefault(uid, asyncio.Lock()):
             await coroutine
 
     async def initialize(self):
@@ -75,7 +78,6 @@ class PerUserProcessor(BaseUpdateProcessor):
 
 # ============ Утилиты ============
 def L(ctx, update) -> str:
-    """Язык пользователя (кэш в user_data, источник — БД)."""
     lang = ctx.user_data.get("lang")
     if not lang:
         u = update.effective_user
@@ -105,7 +107,6 @@ def plan_limits(b):
 
 
 def current_brand(uid):
-    """Активный бренд пользователя (+ список всех его брендов)."""
     brands = db.user_brands(uid)
     if not brands:
         return None, brands
@@ -116,24 +117,10 @@ def current_brand(uid):
     return b, brands
 
 
-def load_brand_obj(bid) -> R.Brand:
-    b = db.get_brand(bid)
-    kit = b["kit"]
-    font = db.get_asset(bid, "font") if kit.get("font") == "custom" else None
-    return R.Brand(kit, db.get_asset(bid, "logo"), db.get_asset(bid, "logo_cover"), font)
-
-
-_SAMPLE = None
-
-
-def sample_for(bid) -> Image.Image:
-    global _SAMPLE
-    data = db.get_asset(bid, "sample")
-    if data:
-        return R.open_photo(data)
-    if _SAMPLE is None:
-        _SAMPLE = R.sample_image()
-    return _SAMPLE
+def editor_btn(ctx, bid):
+    if not WEBAPP_URL:
+        return None
+    return Btn(tx(ctx, "b_editor"), web_app=WebAppInfo(url=f"{WEBAPP_URL}/?b={bid}"))
 
 
 def safe_name(name: str) -> str:
@@ -142,7 +129,6 @@ def safe_name(name: str) -> str:
 
 
 async def run(fn, *a):
-    """Тяжёлый рендер — в отдельном потоке, не больше RENDER_WORKERS одновременно."""
     async with RENDER_SEM:
         return await asyncio.to_thread(fn, *a)
 
@@ -160,6 +146,15 @@ async def say(update, text, kb=None):
                                                     disable_web_page_preview=True)
 
 
+async def strip_kb(update):
+    q = update.callback_query
+    if q and q.message:
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+
+
 async def edit_or_say(update, text, kb=None):
     q = update.callback_query
     if q and q.message and not q.message.photo:
@@ -172,17 +167,7 @@ async def edit_or_say(update, text, kb=None):
     await say(update, text, kb)
 
 
-async def strip_kb(update):
-    q = update.callback_query
-    if q and q.message:
-        try:
-            await q.edit_message_reply_markup(reply_markup=None)
-        except TelegramError:
-            pass
-
-
 async def put_photo(update, data: bytes, caption, kb):
-    """Показ превью: редактируем текущее фото-сообщение, иначе шлём новое."""
     q = update.callback_query
     if q and q.message and q.message.photo:
         try:
@@ -198,7 +183,6 @@ async def put_photo(update, data: bytes, caption, kb):
 
 
 async def get_file_bytes(update, ctx):
-    """(bytes, sent_as_photo) из фото или документа. None + сообщение, если не вышло."""
     msg = update.message
     try:
         if msg.document:
@@ -240,8 +224,12 @@ def menu_text(ctx, b):
 def menu_kb(ctx, b, brands):
     rows = [[Btn(tx(ctx, "b_new"), callback_data="menu:new")]]
     if b["role"] == "owner":
-        rows.append([Btn(tx(ctx, "b_kit"), callback_data="menu:kit"),
-                     Btn(tx(ctx, "b_team"), callback_data="menu:team")])
+        eb = editor_btn(ctx, b["id"])
+        if eb and db.has_asset(b["id"], "logo"):
+            rows.append([eb])
+        elif not db.has_asset(b["id"], "logo"):
+            rows.append([Btn(tx(ctx, "k_setup"), callback_data="menu:setup")])
+        rows.append([Btn(tx(ctx, "b_team"), callback_data="menu:team")])
     row = []
     if len(brands) > 1:
         row.append(Btn(tx(ctx, "b_switch"), callback_data="menu:switch"))
@@ -285,8 +273,7 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await answer(update)
     action = update.callback_query.data.split(":", 1)[1]
     uid = update.effective_user.id
-    if action not in ("new",):
-        reset_session(ctx)
+    reset_session(ctx)
 
     if action == "home":
         return await show_menu(update, ctx, edit=True)
@@ -302,22 +289,19 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     b, brands = current_brand(uid)
     if not b:
         return await show_menu(update, ctx)
-
     if action == "switch":
         rows = [[Btn(("✓ " if x["id"] == b["id"] else "") + (x["kit"].get("name") or f"#{x['id']}"),
                      callback_data=f"sw:{x['id']}")] for x in brands]
         rows.append([Btn(tx(ctx, "b_menu"), callback_data="menu:home")])
         await edit_or_say(update, tx(ctx, "switch_head"), KB(rows))
         return MENU
-    if action == "kit":
+    if action == "setup":
         if b["role"] != "owner":
             await say(update, tx(ctx, "kit_owner_only"))
             return MENU
         ctx.user_data["kit_bid"] = b["id"]
-        ctx.user_data["wiz"] = not db.has_asset(b["id"], "logo")  # кит не собран — ведём мастером
-        if ctx.user_data["wiz"]:
-            return await ask_name(update, ctx)
-        return await show_kit(update, ctx, edit=True)
+        ctx.user_data["wiz"] = True
+        return await ask_name(update, ctx)
     if action == "team":
         return await show_team(update, ctx, b, edit=True)
     if action == "new":
@@ -334,7 +318,7 @@ async def on_switch(update, ctx):
     return await show_menu(update, ctx, edit=True)
 
 
-# ============ Доступ: инвайт-коды и вступление в команду ============
+# ============ Доступ ============
 async def on_code(update, ctx):
     L(ctx, update)
     res = db.redeem_invite(update.message.text or "")
@@ -386,10 +370,7 @@ async def show_team(update, ctx, b, edit=False):
               limit=plan_limits(b)["members"], link=link)
     kb = KB([[Btn(tx(ctx, "b_team_new"), callback_data="team:new")],
              [Btn(tx(ctx, "b_menu"), callback_data="menu:home")]])
-    if edit:
-        await edit_or_say(update, text, kb)
-    else:
-        await say(update, text, kb)
+    await (edit_or_say(update, text, kb) if edit else say(update, text, kb))
     return MENU
 
 
@@ -404,29 +385,17 @@ async def on_team(update, ctx):
     return await show_team(update, ctx, b, edit=True)
 
 
-# ============ Бренд-кит: мастер и редактор ============
-def wiz(ctx):
-    return bool(ctx.user_data.get("wiz"))
-
-
+# ============ Онбординг: название → логотип → редактор ============
 def step(ctx, n):
-    return tx(ctx, "step", n=n) if wiz(ctx) else ""
-
-
-def edit_back_row(ctx):
-    return [] if wiz(ctx) else [[Btn(tx(ctx, "b_back"), callback_data="kit:back")]]
+    return tx(ctx, "step", n=n) if ctx.user_data.get("wiz") else ""
 
 
 def kit_bid(ctx):
     return ctx.user_data.get("kit_bid")
 
 
-def kit(ctx):
-    return db.get_brand(kit_bid(ctx))["kit"]
-
-
 async def ask_name(update, ctx):
-    await edit_or_say(update, step(ctx, 1) + tx(ctx, "ask_name"), KB(edit_back_row(ctx)) if not wiz(ctx) else None)
+    await edit_or_say(update, step(ctx, 1) + tx(ctx, "ask_name"))
     return K_NAME
 
 
@@ -436,320 +405,33 @@ async def on_name(update, ctx):
         await say(update, tx(ctx, "name_bad"))
         return K_NAME
     db.update_kit(kit_bid(ctx), name=name)
-    if wiz(ctx):
-        return await ask_logo(update, ctx)
-    return await show_kit(update, ctx)
-
-
-async def ask_logo(update, ctx):
-    await edit_or_say(update, step(ctx, 2) + tx(ctx, "ask_logo"), KB(edit_back_row(ctx)) if not wiz(ctx) else None)
+    await say(update, step(ctx, 2) + tx(ctx, "ask_logo"))
     return K_LOGO
 
 
-async def _receive_logo(update, ctx, kind):
-    """Общий приём логотипа (основного или для обложек). True, если сохранён."""
+async def on_logo(update, ctx):
     data, as_photo = await get_file_bytes(update, ctx)
     if not data:
-        return False
+        return K_LOGO
     try:
         png, had_alpha = await run(R.prepare_logo, data)
     except ValueError:
         await say(update, tx(ctx, "logo_empty"))
-        return False
+        return K_LOGO
     except Exception as e:
         logger.info("logo open failed: %s", e)
         await say(update, tx(ctx, "logo_bad"))
-        return False
-    db.set_asset(kit_bid(ctx), kind, png)
+        return K_LOGO
+    bid = kit_bid(ctx)
+    db.set_asset(bid, "logo", png)
     if as_photo:
         await say(update, tx(ctx, "logo_photo"))
     elif not had_alpha:
         await say(update, tx(ctx, "logo_bg"))
-    return True
-
-
-async def on_logo(update, ctx):
-    if not await _receive_logo(update, ctx, "logo"):
-        return K_LOGO
-    if wiz(ctx):
-        return await ask_sample(update, ctx)
-    return await show_layout(update, ctx)
-
-
-async def ask_sample(update, ctx):
-    rows = [[Btn(tx(ctx, "b_skip"), callback_data="smp:skip")]] + edit_back_row(ctx)
-    await edit_or_say(update, step(ctx, 3) + tx(ctx, "ask_sample"), KB(rows))
-    return K_SAMPLE
-
-
-def _prepare_sample(data):
-    img = R.open_photo(data)
-    img.thumbnail((1600, 1600), Image.LANCZOS)
-    return R.to_jpeg(img, 88)
-
-
-async def on_sample(update, ctx):
-    data, _ = await get_file_bytes(update, ctx)
-    if not data:
-        return K_SAMPLE
-    try:
-        jpg = await run(_prepare_sample, data)
-    except Exception:
-        await say(update, tx(ctx, "photo_bad"))
-        return K_SAMPLE
-    db.set_asset(kit_bid(ctx), "sample", jpg)
-    return await show_layout(update, ctx)
-
-
-async def on_sample_skip(update, ctx):
-    await answer(update)
-    if wiz(ctx):
-        return await show_layout(update, ctx)
-    return await show_kit(update, ctx, edit=True)
-
-
-# ---- Расположение и цвет (живое превью) ----
-def _layout_preview(bid, tag):
-    brand = load_brand_obj(bid)
-    return R.to_preview(R.render_branding(sample_for(bid), "4:5", tag, brand))
-
-
-def preview_tag(k):
-    return (k.get("hashtags") or ["#hashtag"])[0]
-
-
-def layout_kb(ctx, k):
-    def mark(ok, label):
-        return ("✓ " if ok else "") + label
-
-    pos = k.get("pos", "bl")
-    size = k.get("size", "m")
-    col = k.get("color", "adaptive")
-    rows = [
-        [Btn(mark(pos == p, POS_ICONS[p]), callback_data=f"lay:pos:{p}") for p in ("tl", "tr")],
-        [Btn(mark(pos == p, POS_ICONS[p]), callback_data=f"lay:pos:{p}") for p in ("bl", "br")],
-        [Btn(mark(size == s, s.upper()), callback_data=f"lay:size:{s}") for s in ("s", "m", "l")],
-        [Btn(mark(col == c, tx(ctx, f"c_{c}")), callback_data=f"lay:col:{c}") for c in ("adaptive", "white")],
-        [Btn(mark(col == c, tx(ctx, f"c_{c}")), callback_data=f"lay:col:{c}") for c in ("black", "original")],
-        [Btn(tx(ctx, "b_next") if wiz(ctx) else tx(ctx, "b_save"), callback_data="lay:ok")],
-    ]
-    return KB(rows)
-
-
-async def show_layout(update, ctx):
-    k = kit(ctx)
-    data = await run(_layout_preview, kit_bid(ctx), preview_tag(k))
-    await put_photo(update, data, step(ctx, 4) + tx(ctx, "layout_cap"), layout_kb(ctx, k))
-    return K_LAYOUT
-
-
-async def on_layout(update, ctx):
-    await answer(update)
-    parts = update.callback_query.data.split(":")
-    if parts[1] == "ok":
-        await strip_kb(update)
-        if wiz(ctx):
-            return await show_font(update, ctx, fresh=True)
-        return await show_kit(update, ctx)
-    field = {"pos": "pos", "size": "size", "col": "color"}[parts[1]]
-    if kit(ctx).get(field) == parts[2]:
-        return K_LAYOUT
-    db.update_kit(kit_bid(ctx), **{field: parts[2]})
-    return await show_layout(update, ctx)
-
-
-# ---- Шрифт (превью обложки) ----
-def _font_preview(bid, title, tag):
-    brand = load_brand_obj(bid)
-    return R.to_preview(R.render_cover_feed(sample_for(bid), "4:5", title, tag, brand))
-
-
-def font_kb(ctx, k):
-    cur = k.get("font")
-    keys = list(R.FONTS.keys())
-    rows = []
-    for i in range(0, len(keys), 2):
-        rows.append([Btn(("✓ " if cur == key else "") + R.FONTS[key]["label"], callback_data=f"fnt:{key}")
-                     for key in keys[i:i + 2]])
-    up = tx(ctx, "b_font_up")
-    if cur == "custom":
-        up = "✓ " + up
-    rows.append([Btn(up, callback_data="fnt:up")])
-    rows.append([Btn(tx(ctx, "b_next") if wiz(ctx) else tx(ctx, "b_save"), callback_data="fnt:ok")])
-    return KB(rows)
-
-
-async def show_font(update, ctx, fresh=False):
-    k = kit(ctx)
-    data = await run(_font_preview, kit_bid(ctx), tx(ctx, "preview_title"), preview_tag(k))
-    caption = step(ctx, 5) + tx(ctx, "font_cap")
-    if fresh:
-        await update.effective_chat.send_photo(io.BytesIO(data), caption=caption, parse_mode=HTML,
-                                               reply_markup=font_kb(ctx, k))
-    else:
-        await put_photo(update, data, caption, font_kb(ctx, k))
-    return K_FONT
-
-
-async def on_font(update, ctx):
-    await answer(update)
-    key = update.callback_query.data.split(":", 1)[1]
-    if key == "ok":
-        await strip_kb(update)
-        if wiz(ctx):
-            return await ask_tags(update, ctx)
-        return await show_kit(update, ctx)
-    if key == "up":
-        await strip_kb(update)
-        await say(update, tx(ctx, "ask_font"), KB([[Btn(tx(ctx, "b_back"), callback_data="fnt:back")]]))
-        return K_FONT_UP
-    if key == "back":
-        await strip_kb(update)
-        return await show_font(update, ctx, fresh=True)
-    if key in R.FONTS and kit(ctx).get("font") != key:
-        db.update_kit(kit_bid(ctx), font=key)
-        return await show_font(update, ctx)
-    return K_FONT
-
-
-async def on_font_file(update, ctx):
-    doc = update.message.document
-    name = (doc.file_name or "").lower() if doc else ""
-    if not doc or not name.endswith((".ttf", ".otf")):
-        await say(update, tx(ctx, "font_bad"))
-        return K_FONT_UP
-    data, _ = await get_file_bytes(update, ctx)
-    if not data or not R.validate_font(data):
-        await say(update, tx(ctx, "font_bad"))
-        return K_FONT_UP
-    db.set_asset(kit_bid(ctx), "font", data)
-    db.update_kit(kit_bid(ctx), font="custom")
-    return await show_font(update, ctx, fresh=True)
-
-
-# ---- Хештеги ----
-async def ask_tags(update, ctx):
-    rows = [[Btn(tx(ctx, "b_skip"), callback_data="tags:skip")]] + edit_back_row(ctx)
-    await say(update, step(ctx, 6) + tx(ctx, "ask_tags"), KB(rows))
-    return K_TAGS
-
-
-def parse_tags(text):
-    seen, out = set(), []
-    for w in re.findall(r"#?([\w\-]{1,30})", text or ""):
-        tag = "#" + w
-        if tag.lower() not in seen:
-            seen.add(tag.lower())
-            out.append(tag)
-    return out[:16]
-
-
-async def on_tags(update, ctx):
-    tags = parse_tags(update.message.text)
-    if not tags:
-        await say(update, tx(ctx, "tags_bad"))
-        return K_TAGS
-    db.update_kit(kit_bid(ctx), hashtags=tags)
-    if wiz(ctx):
-        return await finish_wizard(update, ctx)
-    return await show_kit(update, ctx)
-
-
-async def on_tags_skip(update, ctx):
-    await answer(update)
-    await strip_kb(update)
-    if wiz(ctx):
-        return await finish_wizard(update, ctx)
-    return await show_kit(update, ctx)
-
-
-async def finish_wizard(update, ctx):
-    ctx.user_data["wiz"] = False
-    k = kit(ctx)
-    data = await run(_layout_preview, kit_bid(ctx), preview_tag(k))
-    await update.effective_chat.send_photo(io.BytesIO(data), caption=tx(ctx, "wiz_done"), parse_mode=HTML)
+    eb = editor_btn(ctx, bid)
+    await say(update, tx(ctx, "wiz_done") if eb else tx(ctx, "editor_off"), KB([[eb]]) if eb else None)
     reset_session(ctx)
     return await show_menu(update, ctx)
-
-
-# ---- Меню кита ----
-def kit_text(ctx, bid):
-    b = db.get_brand(bid)
-    k = b["kit"]
-    font = R.FONTS[k["font"]]["label"] if k.get("font") in R.FONTS else tx(ctx, "font_custom")
-    return tx(ctx, "kit_head", brand=esc(k.get("name") or "—"), font=esc(font),
-              pos=tx(ctx, "pos_" + k.get("pos", "bl")), size=k.get("size", "m").upper(),
-              color=tx(ctx, "col_" + k.get("color", "adaptive")),
-              cover=tx(ctx, "cover_own" if db.has_asset(bid, "logo_cover") else "cover_same"),
-              tags=esc(" ".join(k.get("hashtags") or [])) or tx(ctx, "tags_none"))
-
-
-def kit_kb(ctx):
-    b = lambda key, cb: Btn(tx(ctx, key), callback_data=f"kit:{cb}")  # noqa: E731
-    return KB([
-        [b("k_name", "name"), b("k_logo", "logo")],
-        [b("k_cover", "cover"), b("k_sample", "sample")],
-        [b("k_layout", "layout"), b("k_font", "font")],
-        [b("k_tags", "tags")],
-        [Btn(tx(ctx, "b_menu"), callback_data="menu:home")],
-    ])
-
-
-async def show_kit(update, ctx, edit=False):
-    ctx.user_data["wiz"] = False
-    text, kb = kit_text(ctx, kit_bid(ctx)), kit_kb(ctx)
-    if edit:
-        await edit_or_say(update, text, kb)
-    else:
-        await say(update, text, kb)
-    return KIT
-
-
-async def on_kit(update, ctx):
-    await answer(update)
-    action = update.callback_query.data.split(":", 1)[1]
-    if not kit_bid(ctx):
-        return await show_menu(update, ctx, edit=True)
-    ctx.user_data["wiz"] = False
-    if action == "back":
-        await strip_kb(update)
-        return await show_kit(update, ctx, edit=not (update.callback_query.message.photo))
-    if action == "name":
-        return await ask_name(update, ctx)
-    if action == "logo":
-        return await ask_logo(update, ctx)
-    if action == "sample":
-        return await ask_sample(update, ctx)
-    if action == "layout":
-        await strip_kb(update)
-        return await show_layout(update, ctx)
-    if action == "font":
-        await strip_kb(update)
-        return await show_font(update, ctx, fresh=True)
-    if action == "tags":
-        await strip_kb(update)
-        return await ask_tags(update, ctx)
-    if action == "cover":
-        rows = [[Btn(tx(ctx, "b_cover_reset"), callback_data="cov:reset")],
-                [Btn(tx(ctx, "b_back"), callback_data="kit:back")]]
-        await edit_or_say(update, tx(ctx, "ask_cover"), KB(rows))
-        return K_COVER
-    return KIT
-
-
-async def on_cover_file(update, ctx):
-    if not await _receive_logo(update, ctx, "logo_cover"):
-        return K_COVER
-    k = kit(ctx)
-    data = await run(_font_preview, kit_bid(ctx), tx(ctx, "preview_title"), preview_tag(k))
-    await update.effective_chat.send_photo(io.BytesIO(data))
-    return await show_kit(update, ctx)
-
-
-async def on_cover_reset(update, ctx):
-    await answer(update)
-    db.del_asset(kit_bid(ctx), "logo_cover")
-    return await show_kit(update, ctx, edit=True)
 
 
 # ============ Создание поста ============
@@ -769,16 +451,28 @@ async def start_post(update, ctx, b):
 
 
 async def ask_tpl(update, ctx):
-    kb = KB([[Btn(tx(ctx, "tpl_branding"), callback_data="tpl:branding")],
-             [Btn(tx(ctx, "tpl_cover"), callback_data="tpl:cover")],
-             [Btn(tx(ctx, "b_menu"), callback_data="menu:home")]])
-    await edit_or_say(update, tx(ctx, "tpl_head"), kb)
+    p = post(ctx)
+    tpls = db.list_templates(p["bid"])
+    if not tpls:
+        b = db.get_brand(p["bid"])
+        eb = editor_btn(ctx, b["id"])
+        rows = ([[eb]] if eb else []) + [[Btn(tx(ctx, "b_menu"), callback_data="menu:home")]]
+        await edit_or_say(update, tx(ctx, "no_tpl"), KB(rows))
+        return MENU
+    rows = [[Btn(tp["name"] + (tx(ctx, "tpl_story") if tp["spec"]["story"].get("enabled") else ""),
+                 callback_data=f"tp:{tp['id']}")] for tp in tpls]
+    rows.append([Btn(tx(ctx, "b_menu"), callback_data="menu:home")])
+    await edit_or_say(update, tx(ctx, "ask_tpl"), KB(rows))
     return P_TPL
 
 
 async def on_tpl(update, ctx):
     await answer(update)
-    post(ctx)["tpl"] = update.callback_query.data.split(":")[1]
+    p = post(ctx)
+    tp = db.get_template(p["bid"], int(update.callback_query.data.split(":")[1]))
+    if not tp:
+        return await ask_tpl(update, ctx)
+    p.update(tid=tp["id"], spec=tp["spec"], tname=tp["name"], fields=R.spec_fields(tp["spec"]))
     return await ask_photos(update, ctx)
 
 
@@ -808,7 +502,6 @@ async def on_photo(update, ctx):
         await say(update, tx(ctx, "photo_bad"))
         return P_PHOTOS
     photos.append(data)
-    # Одно «живое» статус-сообщение внизу вместо десяти одинаковых
     prev = ctx.user_data.pop("status_msg", None)
     m = await say(update, tx(ctx, "photos_n", n=len(photos)),
                   KB([[Btn(tx(ctx, "b_done_ph"), callback_data="p:done")]]))
@@ -838,14 +531,23 @@ async def on_photos_done(update, ctx):
         return P_PHOTOS
     ctx.user_data.pop("status_msg", None)
     await strip_kb(update)
-    if p["tpl"] == "cover":
-        return await ask_title(update, ctx)
+    return await next_field(update, ctx, after=P_PHOTOS)
+
+
+async def next_field(update, ctx, after):
+    """Шаги после фото зависят от шаблона: какие поля он использует."""
+    p = post(ctx)
+    order = [(P_TITLE, "title"), (P_SUBTITLE, "subtitle")]
+    for state, field in order:
+        if state > after and field in p["fields"]:
+            if state == P_TITLE:
+                await say(update, tx(ctx, "ask_title"), KB([[Btn(tx(ctx, "b_back"), callback_data="p:back")]]))
+            else:
+                await say(update, tx(ctx, "ask_subtitle"),
+                          KB([[Btn(tx(ctx, "b_skip_field"), callback_data="p:skipsub")],
+                              [Btn(tx(ctx, "b_back"), callback_data="p:back")]]))
+            return state
     return await ask_format(update, ctx)
-
-
-async def ask_title(update, ctx):
-    await say(update, tx(ctx, "ask_title"), KB([[Btn(tx(ctx, "b_back"), callback_data="p:back")]]))
-    return P_TITLE
 
 
 async def on_title(update, ctx):
@@ -853,27 +555,41 @@ async def on_title(update, ctx):
     if not title.strip():
         await say(update, tx(ctx, "title_bad"))
         return P_TITLE
-    post(ctx)["title"] = title
+    post(ctx)["title"] = title[:300]
+    return await next_field(update, ctx, after=P_TITLE)
+
+
+async def on_subtitle(update, ctx):
+    post(ctx)["subtitle"] = (update.message.text or "").strip()[:300]
+    return await ask_format(update, ctx)
+
+
+async def on_skip_subtitle(update, ctx):
+    await answer(update)
+    await strip_kb(update)
+    post(ctx)["subtitle"] = ""
     return await ask_format(update, ctx)
 
 
 async def ask_format(update, ctx):
     p = post(ctx)
-    keys = COVER_FEED_FORMATS if p["tpl"] == "cover" else FEED_FORMATS
-    label = lambda k: tx(ctx, "fmt_orig") if k == "orig" else k  # noqa: E731
+    keys = [k for k in FORMATS if not (k == "9:16" and p["spec"]["story"].get("enabled"))]
     main = [k for k in keys if k != "orig"]
-    rows = [[Btn(label(k), callback_data=f"fmt:{k}") for k in main[i:i + 3]] for i in range(0, len(main), 3)]
-    rows.append([Btn(label("orig"), callback_data="fmt:orig")])
+    rows = [[Btn(k, callback_data=f"fmt:{k}") for k in main[i:i + 3]] for i in range(0, len(main), 3)]
+    rows.append([Btn(tx(ctx, "fmt_orig"), callback_data="fmt:orig")])
     rows.append([Btn(tx(ctx, "b_back"), callback_data="p:back")])
-    text = tx(ctx, "ask_format_cover") if p["tpl"] == "cover" else tx(ctx, "ask_format", n=len(p["photos"]))
-    await edit_or_say(update, text, KB(rows))
+    await edit_or_say(update, tx(ctx, "ask_format", n=len(p["photos"])), KB(rows))
     return P_FORMAT
 
 
 async def on_format(update, ctx):
     await answer(update)
-    post(ctx)["fmt"] = update.callback_query.data.split(":", 1)[1]
-    return await ask_tag(update, ctx)
+    p = post(ctx)
+    p["fmt"] = update.callback_query.data.split(":", 1)[1]
+    if "hashtag" in p["fields"]:
+        return await ask_tag(update, ctx)
+    await strip_kb(update)
+    return await proceed(update, ctx, "")
 
 
 def tag_kb(ctx):
@@ -901,8 +617,7 @@ async def on_tag(update, ctx):
     await answer(update)
     parts = update.callback_query.data.split(":")
     if parts[1] == "custom":
-        await edit_or_say(update, tx(ctx, "ask_custom_tag"),
-                          KB([[Btn(tx(ctx, "b_back"), callback_data="p:back")]]))
+        await edit_or_say(update, tx(ctx, "ask_custom_tag"), KB([[Btn(tx(ctx, "b_back"), callback_data="p:back")]]))
         return P_CUSTOM_TAG
     tag = ""
     if parts[1] == "i":
@@ -922,96 +637,78 @@ async def on_custom_tag(update, ctx):
     return await proceed(update, ctx, "#" + token[:30])
 
 
-async def on_post_back(update, ctx):
-    """«Назад» внутри создания поста — шаг зависит от текущего состояния."""
-    await answer(update)
-    state = ctx.user_data.get("_state")
-    p = post(ctx)
-    if state == P_TPL or not p.get("tpl"):
-        return await show_menu(update, ctx, edit=True)
-    if state == P_PHOTOS:
-        return await ask_tpl(update, ctx)
-    if state == P_TITLE:
-        await strip_kb(update)
-        return await ask_photos(update, ctx)
-    if state == P_FORMAT:
-        if p["tpl"] == "cover":
+def back_for(state):
+    async def handler(update, ctx):
+        await answer(update)
+        p = post(ctx)
+        if state == P_TPL or not p.get("tid"):
+            return await show_menu(update, ctx, edit=True)
+        if state == P_PHOTOS:
+            return await ask_tpl(update, ctx)
+        if state == P_TITLE:
             await strip_kb(update)
-            return await ask_title(update, ctx)
-        return await ask_photos(update, ctx)
-    if state in (P_TAG,):
-        return await ask_format(update, ctx)
-    if state in (P_CUSTOM_TAG, P_DARK):
+            return await ask_photos(update, ctx)
+        if state == P_SUBTITLE:
+            await strip_kb(update)
+            if "title" in p["fields"]:
+                return await next_field(update, ctx, after=P_PHOTOS)
+            return await ask_photos(update, ctx)
+        if state == P_FORMAT:
+            await strip_kb(update)
+            if "subtitle" in p["fields"]:
+                return await next_field(update, ctx, after=P_TITLE)
+            if "title" in p["fields"]:
+                return await next_field(update, ctx, after=P_PHOTOS)
+            return await ask_photos(update, ctx)
+        if state == P_TAG:
+            return await ask_format(update, ctx)
+        if state == P_CUSTOM_TAG:
+            return await ask_tag(update, ctx)
         if state == P_DARK:
             try:
                 await update.callback_query.message.delete()
             except TelegramError:
                 pass
-            await say(update, tx(ctx, "ask_tag"), tag_kb(ctx))
-            return P_TAG
-        return await ask_tag(update, ctx)
-    return await show_menu(update, ctx, edit=True)
-
-
-def back_for(state):
-    """Оборачивает on_post_back, запоминая состояние, из которого нажали «Назад»."""
-    async def handler(update, ctx):
-        ctx.user_data["_state"] = state
-        return await on_post_back(update, ctx)
+            if "hashtag" in p["fields"]:
+                await say(update, tx(ctx, "ask_tag"), tag_kb(ctx))
+                return P_TAG
+            return await ask_format(update, ctx)
+        return await show_menu(update, ctx, edit=True)
     return handler
+
+
+def _ctx_for(base, p, i, n, dark):
+    return R.Ctx(base.palette, base.logos, base.customs,
+                 dict(title=p.get("title", ""), subtitle=p.get("subtitle", ""), hashtag=p.get("tag", ""), i=i, n=n),
+                 dark)
+
+
+def _render_job(data, spec, fmt, ctx):
+    return [(suf, R.to_jpeg(im)) for suf, im in R.render_template(R.open_photo(data), spec, fmt, ctx)]
+
+
+def _preview_job(data, spec, fmt, ctx):
+    photo = R.open_photo(data)
+    W, H = R.feed_size(photo, fmt)
+    return R.to_preview(R.render_surface(photo, W, H, spec["feed"]["layers"], ctx))
 
 
 async def proceed(update, ctx, tag):
     p = post(ctx)
     p["tag"] = tag
-    if p["tpl"] == "cover":
+    p["base"] = await run(web.brand_ctx, p["bid"])
+    if R.spec_has_shade(p["spec"]):
         p["dark"] = R.DARK_DEFAULT_IDX
         return await show_dark(update, ctx, fresh=True)
-    return await render_branding_batch(update, ctx)
-
-
-def _branding_job(data, fmt, tag, brand):
-    return R.to_jpeg(R.render_branding(R.open_photo(data), fmt, tag, brand))
-
-
-def _cover_job(data, fmt, title, tag, brand, level):
-    img = R.open_photo(data)
-    return (R.to_jpeg(R.render_cover_feed(img, fmt, title, tag, brand, level)),
-            R.to_jpeg(R.render_cover_story(img, "ig", title, brand, level)),
-            R.to_jpeg(R.render_cover_story(img, "tg", title, brand, level)))
-
-
-def _cover_preview(data, fmt, title, tag, brand, level):
-    return R.to_preview(R.render_cover_feed(R.open_photo(data), fmt, title, tag, brand, level))
-
-
-async def render_branding_batch(update, ctx):
-    p = post(ctx)
-    photos, bid = p["photos"], p["bid"]
-    await say(update, tx(ctx, "working", n=len(photos)))
-    brand = load_brand_obj(bid)
-    base = safe_name(brand.kit.get("name"))
-    ok = 0
-    for i, data in enumerate(photos, 1):
-        try:
-            jpg = await run(_branding_job, data, p["fmt"], p["tag"], brand)
-            await update.effective_chat.send_document(io.BytesIO(jpg), filename=f"{base}_{i}.jpg")
-            ok += 1
-        except Exception as e:
-            logger.exception("branding photo %s: %s", i, e)
-            await say(update, tx(ctx, "photo_err", i=i))
-    db.record_event(bid, update.effective_user.id, "branding", ok)
-    await say(update, tx(ctx, "done", ok=ok, n=len(photos)))
-    reset_session(ctx)
-    return await show_menu(update, ctx)
+    return await render_batch(update, ctx, 0.0)
 
 
 def dark_meter(idx):
-    return "●" * (idx + 1) + "○" * (len(R.DARK_LEVELS) - idx - 1)
+    return "●" * (idx + 1) + "○" * (len(R.DARK_STEPS) - idx - 1)
 
 
 def dark_kb(ctx, idx):
-    last = len(R.DARK_LEVELS) - 1
+    last = len(R.DARK_STEPS) - 1
     return KB([
         [Btn(tx(ctx, "b_lighter") if idx > 0 else "· · ·", callback_data="dk:down" if idx > 0 else "dk:noop"),
          Btn(tx(ctx, "b_darker") if idx < last else "· · ·", callback_data="dk:up" if idx < last else "dk:noop")],
@@ -1022,11 +719,9 @@ def dark_kb(ctx, idx):
 
 async def show_dark(update, ctx, fresh=False):
     p = post(ctx)
-    if "brand_obj" not in p:
-        p["brand_obj"] = load_brand_obj(p["bid"])
     idx = p["dark"]
-    data = await run(_cover_preview, p["photos"][0], p["fmt"], p["title"], p["tag"], p["brand_obj"],
-                     R.DARK_LEVELS[idx])
+    c = _ctx_for(p["base"], p, 1, len(p["photos"]), R.DARK_STEPS[idx])
+    data = await run(_preview_job, p["photos"][0], p["spec"], p["fmt"], c)
     caption = tx(ctx, "dark_cap", meter=dark_meter(idx))
     if fresh:
         await update.effective_chat.send_photo(io.BytesIO(data), caption=caption, parse_mode=HTML,
@@ -1044,32 +739,36 @@ async def on_dark(update, ctx):
         await answer(update)
         return P_DARK
     if action in ("up", "down"):
-        new = max(0, min(len(R.DARK_LEVELS) - 1, p["dark"] + (1 if action == "up" else -1)))
+        new = max(0, min(len(R.DARK_STEPS) - 1, p["dark"] + (1 if action == "up" else -1)))
         if new == p["dark"]:
             await q.answer(tx(ctx, "edge"))
             return P_DARK
         await answer(update)
         p["dark"] = new
         return await show_dark(update, ctx)
-    # ok → финальный рендер
     await answer(update)
     await strip_kb(update)
-    await say(update, tx(ctx, "working_cover"))
-    brand = p.get("brand_obj") or load_brand_obj(p["bid"])
-    base = safe_name(brand.kit.get("name"))
-    level = R.DARK_LEVELS[p["dark"]]
+    return await render_batch(update, ctx, R.DARK_STEPS[p["dark"]])
+
+
+async def render_batch(update, ctx, dark):
+    p = post(ctx)
+    photos, bid, n = p["photos"], p["bid"], len(p["photos"])
+    await say(update, tx(ctx, "working", n=n))
+    base = safe_name(db.get_brand(bid)["kit"].get("name")) + "_" + safe_name(p.get("tname"))
     ok = 0
-    for i, data in enumerate(p["photos"], 1):
+    for i, data in enumerate(photos, 1):
         try:
-            feed, ig, tg = await run(_cover_job, data, p["fmt"], p["title"], p["tag"], brand, level)
-            for blob, suffix in ((feed, "feed"), (ig, "story_ig"), (tg, "story_tg")):
-                await update.effective_chat.send_document(io.BytesIO(blob), filename=f"{base}_cover_{i}_{suffix}.jpg")
+            outs = await run(_render_job, data, p["spec"], p["fmt"], _ctx_for(p["base"], p, i, n, dark))
+            for suf, blob in outs:
+                name = f"{base}_{i}.jpg" if suf == "feed" else f"{base}_{i}_story.jpg"
+                await update.effective_chat.send_document(io.BytesIO(blob), filename=name)
             ok += 1
         except Exception as e:
-            logger.exception("cover photo %s: %s", i, e)
+            logger.exception("photo %s: %s", i, e)
             await say(update, tx(ctx, "photo_err", i=i))
-    db.record_event(p["bid"], update.effective_user.id, "cover", ok)
-    await say(update, tx(ctx, "done", ok=ok, n=len(p["photos"])))
+    db.record_event(bid, update.effective_user.id, "tpl", ok)
+    await say(update, tx(ctx, "done", ok=ok, n=n))
     reset_session(ctx)
     return await show_menu(update, ctx)
 
@@ -1130,9 +829,11 @@ async def cmd_brands(update, ctx):
         state = "✅" if db.plan_active(b) else "⛔"
         lines.append(f"{state} <b>#{b['id']}</b> {esc(b['kit'].get('name') or '—')} · {b['plan']} до "
                      f"{fmt_date(b['plan_until'])} · 👥{db.member_count(b['id'])} · "
-                     f"📷{db.photos_used(b['id'])}/{plan_limits(b)['photos']}")
+                     f"🧩{db.template_count(b['id'])} · 📷{db.photos_used(b['id'])}/{plan_limits(b)['photos']}")
     storage = "постоянное" if db.STORAGE_PERSISTENT else "⚠️ ВРЕМЕННОЕ — подключи Volume"
-    await update.message.reply_text("\n".join(lines) + f"\n\nХранилище: {storage}", parse_mode=HTML)
+    editor = WEBAPP_URL or "⚠️ не задан WEBAPP_URL"
+    await update.message.reply_text("\n".join(lines) + f"\n\nХранилище: {storage}\nРедактор: {editor}",
+                                    parse_mode=HTML, disable_web_page_preview=True)
 
 
 async def cmd_extend(update, ctx):
@@ -1157,7 +858,6 @@ async def cmd_extend(update, ctx):
 
 
 async def on_stale(update, ctx):
-    """Кнопка из старого сообщения, когда диалог уже в другом месте."""
     L(ctx, update)
     try:
         await update.callback_query.answer(tx(ctx, "stale"), show_alert=True)
@@ -1166,7 +866,6 @@ async def on_stale(update, ctx):
 
 
 async def on_orphan(update, ctx):
-    """Сообщение вне диалога (например, после перезапуска бота) — показываем меню."""
     L(ctx, update)
     await say(update, tx(ctx, "stale"))
 
@@ -1181,37 +880,22 @@ def build_app(token=None):
            .concurrent_updates(PerUserProcessor(64))
            .read_timeout(120).write_timeout(120).connect_timeout(30)
            .build())
-
     IMG = filters.PHOTO | filters.Document.ALL
     TXT = filters.TEXT & ~filters.COMMAND
-    kit_back = CallbackQueryHandler(on_kit, pattern="^kit:back$")
-
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", cmd_start),
             CommandHandler("menu", cmd_start),
             CallbackQueryHandler(on_menu, pattern="^menu:"),
-            # Код, присланный без /start (клиент просто переслал его боту)
             MessageHandler(filters.Regex(CODE_RE), on_code),
         ],
         states={
             MENU: [CallbackQueryHandler(on_switch, pattern=r"^sw:\d+$"),
                    CallbackQueryHandler(on_team, pattern="^team:new$")],
             CODE: [MessageHandler(TXT, on_code)],
-            K_NAME: [MessageHandler(TXT, on_name), kit_back],
-            K_LOGO: [MessageHandler(IMG, on_logo), kit_back],
-            K_SAMPLE: [MessageHandler(IMG, on_sample),
-                       CallbackQueryHandler(on_sample_skip, pattern="^smp:skip$"), kit_back],
-            K_LAYOUT: [CallbackQueryHandler(on_layout, pattern="^lay:")],
-            K_FONT: [CallbackQueryHandler(on_font, pattern="^fnt:")],
-            K_FONT_UP: [MessageHandler(filters.Document.ALL, on_font_file),
-                        CallbackQueryHandler(on_font, pattern="^fnt:back$")],
-            K_TAGS: [MessageHandler(TXT, on_tags),
-                     CallbackQueryHandler(on_tags_skip, pattern="^tags:skip$"), kit_back],
-            KIT: [CallbackQueryHandler(on_kit, pattern="^kit:")],
-            K_COVER: [MessageHandler(IMG, on_cover_file),
-                      CallbackQueryHandler(on_cover_reset, pattern="^cov:reset$"), kit_back],
-            P_TPL: [CallbackQueryHandler(on_tpl, pattern="^tpl:"),
+            K_NAME: [MessageHandler(TXT, on_name)],
+            K_LOGO: [MessageHandler(IMG, on_logo)],
+            P_TPL: [CallbackQueryHandler(on_tpl, pattern=r"^tp:\d+$"),
                     CallbackQueryHandler(back_for(P_TPL), pattern="^p:back$")],
             P_PHOTOS: [MessageHandler(IMG, on_photo),
                        CommandHandler("done", on_photos_done),
@@ -1219,6 +903,9 @@ def build_app(token=None):
                        CallbackQueryHandler(back_for(P_PHOTOS), pattern="^p:back$")],
             P_TITLE: [MessageHandler(TXT, on_title),
                       CallbackQueryHandler(back_for(P_TITLE), pattern="^p:back$")],
+            P_SUBTITLE: [MessageHandler(TXT, on_subtitle),
+                         CallbackQueryHandler(on_skip_subtitle, pattern="^p:skipsub$"),
+                         CallbackQueryHandler(back_for(P_SUBTITLE), pattern="^p:back$")],
             P_FORMAT: [CallbackQueryHandler(on_format, pattern="^fmt:"),
                        CallbackQueryHandler(back_for(P_FORMAT), pattern="^p:back$")],
             P_TAG: [CallbackQueryHandler(on_tag, pattern="^tag:"),
@@ -1231,7 +918,6 @@ def build_app(token=None):
         fallbacks=[CommandHandler("cancel", cmd_cancel), CommandHandler("start", cmd_start)],
         allow_reentry=True,
     )
-
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("newcode", cmd_newcode))
     app.add_handler(CommandHandler("codes", cmd_codes))
@@ -1244,13 +930,38 @@ def build_app(token=None):
     return app
 
 
-def main():
-    if not TOKEN:
-        raise SystemExit("BOT_TOKEN не задан")
+async def amain():
     db.init_db()
     if not ADMIN_IDS:
         logger.warning("ADMIN_IDS не задан — админ-команды недоступны. Узнай свой ID через /myid.")
-    build_app().run_polling(allowed_updates=Update.ALL_TYPES)
+    if not WEBAPP_URL:
+        logger.warning("WEBAPP_URL не задан и RAILWAY_PUBLIC_DOMAIN нет — кнопка редактора скрыта.")
+    runner = aioweb.AppRunner(web.build_web(TOKEN))
+    await runner.setup()
+    await aioweb.TCPSite(runner, "0.0.0.0", PORT).start()
+    logger.info("Редактор: порт %s, адрес %s", PORT, WEBAPP_URL or "—")
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            pass
+    app = build_app()
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await stop.wait()
+        await app.updater.stop()
+        await app.stop()
+    await runner.cleanup()
+
+
+def main():
+    if not TOKEN:
+        raise SystemExit("BOT_TOKEN не задан")
+    asyncio.run(amain())
 
 
 if __name__ == "__main__":
