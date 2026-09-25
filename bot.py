@@ -148,6 +148,13 @@ def track(msg, kind="prompt", ttl=None):
 
 async def pre_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """До обработки: запоминаем вопросы, на которые сейчас пришёл ответ."""
+    u = update.effective_user
+    if u and not u.is_bot:
+        try:
+            db.ensure_user(u.id, u.language_code)
+            db.touch_user(u.id, u.full_name, u.username)
+        except Exception as e:
+            logger.debug("touch_user: %s", e)
     m = update.message
     if m and m.chat.type == "private" and update.effective_user and not update.effective_user.is_bot:
         db.log_msg(m.chat_id, m.message_id, "user")
@@ -299,14 +306,19 @@ def is_image(data: bytes) -> bool:
 def menu_text(ctx, b):
     lines = [tx(ctx, "menu_head", brand=esc(b["kit"].get("name") or "—"))]
     until = fmt_date(b["plan_until"])
-    if db.plan_active(b):
+    if b.get("locked"):
+        lines.append(tx(ctx, "menu_locked", support=esc(SUPPORT)))
+    elif db.plan_active(b):
         lines.append(tx(ctx, "menu_plan", plan=b["plan"].capitalize(), until=until,
                         used=db.photos_used(b["id"]), limit=plan_limits(b)["photos"]))
     else:
         lines.append(tx(ctx, "menu_expired", until=until, support=esc(SUPPORT)))
+    n_brands, max_brands = len(db.sub_brand_ids(b["id"])), plan_limits(b)["brands"]
+    if max_brands > 1:
+        lines.append(tx(ctx, "brands_count", n=n_brands, limit=max_brands))
     if not db.has_asset(b["id"], "logo"):
         lines.append("\n" + tx(ctx, "menu_no_kit"))
-    else:
+    elif db.plan_active(b):
         lines.append("\n" + tx(ctx, "menu_hint"))
     return "\n".join(lines)
 
@@ -320,6 +332,8 @@ def menu_kb(ctx, b, brands, admin=False):
         elif not db.has_asset(b["id"], "logo"):
             rows.append([Btn(tx(ctx, "k_setup"), callback_data="menu:setup")])
         rows.append([Btn(tx(ctx, "b_team"), callback_data="menu:team")])
+    if can_add_brand(b):
+        rows.append([Btn(tx(ctx, "b_add_brand"), callback_data="menu:addbrand")])
     row = []
     if len(brands) > 1:
         row.append(Btn(tx(ctx, "b_switch"), callback_data="menu:switch"))
@@ -329,6 +343,13 @@ def menu_kb(ctx, b, brands, admin=False):
     if admin:
         rows.append([Btn("🛠 Админ", callback_data="adm:panel")])
     return KB(rows)
+
+
+def can_add_brand(b):
+    """Добавлять бренды может владелец подписки на тарифе, где брендов больше одного."""
+    root = db.get_brand(b["root_id"])
+    return (root and b["role"] == "owner" and db.plan_active(root)
+            and len(db.sub_brand_ids(b["id"])) < plan_limits(root)["brands"])
 
 
 async def show_menu(update, ctx, edit=False):
@@ -394,8 +415,8 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not b:
         return await show_menu(update, ctx)
     if action == "switch":
-        rows = [[Btn(("✓ " if x["id"] == b["id"] else "") + (x["kit"].get("name") or f"#{x['id']}"),
-                     callback_data=f"sw:{x['id']}")] for x in brands]
+        rows = [[Btn(("✓ " if x["id"] == b["id"] else "") + ("⏸ " if x.get("locked") else "")
+                     + (x["kit"].get("name") or f"#{x['id']}"), callback_data=f"sw:{x['id']}")] for x in brands]
         rows.append([Btn(tx(ctx, "b_menu"), callback_data="menu:home")])
         await edit_or_say(update, tx(ctx, "switch_head"), KB(rows))
         return MENU
@@ -408,6 +429,14 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await ask_name(update, ctx)
     if action == "team":
         return await show_team(update, ctx, b, edit=True)
+    if action == "addbrand":
+        if not can_add_brand(b):
+            await say(update, tx(ctx, "brand_limit"), kind="notice")
+            return MENU
+        bid = db.create_brand(uid, b["plan"], 0, sub_id=b["root_id"])
+        ctx.user_data["kit_bid"] = bid
+        ctx.user_data["wiz"] = True
+        return await ask_name(update, ctx)
     if action == "desktop":
         await send_desktop_link(update, ctx, b)
         return MENU
@@ -476,8 +505,9 @@ async def do_join(update, ctx, token):
         db.set_active_brand(u.id, b["id"])
         await say(update, tx(ctx, "join_ok", brand=name), kind="notice")
         return await show_menu(update, ctx)
-    if db.member_count(b["id"]) >= plan_limits(b)["members"]:
-        await say(update, tx(ctx, "join_full", brand=name))
+    in_sub = any(db.member_role(x, u.id) for x in db.sub_brand_ids(b["id"]))
+    if not in_sub and db.sub_member_count(b["id"]) >= plan_limits(b)["members"]:
+        await say(update, tx(ctx, "join_full", brand=name), kind="notice", ttl=60)
         return await show_menu(update, ctx)
     db.add_member(b["id"], u.id, "editor")
     db.set_active_brand(u.id, b["id"])
@@ -492,28 +522,86 @@ async def do_join(update, ctx, token):
     return await show_menu(update, ctx)
 
 
+def person_name(r):
+    return r.get("name") or (("@" + r["username"]) if r.get("username") else f"ID {r['tg_id']}")
+
+
 async def show_team(update, ctx, b, edit=False):
     if b["role"] != "owner":
-        await say(update, tx(ctx, "team_owner_only"))
+        await say(update, tx(ctx, "team_owner_only"), kind="notice")
         return MENU
     link = f"https://t.me/{ctx.bot.username}?start=j_{b['join_token']}"
-    text = tx(ctx, "team_head", brand=esc(b["kit"].get("name") or "—"), n=db.member_count(b["id"]),
+    text = tx(ctx, "team_head", brand=esc(b["kit"].get("name") or "—"), n=db.sub_member_count(b["id"]),
               limit=plan_limits(b)["members"], link=link)
-    kb = KB([[Btn(tx(ctx, "b_team_new"), callback_data="team:new")],
-             [Btn(tx(ctx, "b_menu"), callback_data="menu:home")]])
-    await (edit_or_say(update, text, kb) if edit else say(update, text, kb))
+    stats = db.team_stats(b["id"])
+    text += tx(ctx, "team_activity")
+    for r in stats:
+        text += "\n• " + tx(ctx, "team_line", name=esc(person_name(r)), photos=r["photos_month"], posts=r["posts_month"]) \
+                + (tx(ctx, "team_owner_mark") if r["role"] == "owner" else "")
+    others = [r for r in stats if r["role"] != "owner"]
+    if not others:
+        text += "\n" + tx(ctx, "team_empty")
+    rows = [[Btn("👤 " + person_name(r)[:30], callback_data=f"tm:{r['tg_id']}")] for r in others]
+    rows += [[Btn(tx(ctx, "b_team_new"), callback_data="team:new")],
+             [Btn(tx(ctx, "b_menu"), callback_data="menu:home")]]
+    kb = KB(rows)
+    await (edit_or_say(update, text, kb) if edit else say(update, text, kb, kind="menu"))
     return MENU
 
 
-async def on_team(update, ctx):
+async def on_team_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Кнопки экрана «Команда»: новая ссылка, карточка участника, удаление."""
     L(ctx, update)
-    await answer(update)
+    q = update.callback_query
     b, _ = current_brand(update.effective_user.id)
     if not b or b["role"] != "owner":
-        return await show_menu(update, ctx, edit=True)
-    db.regen_token(b["id"])
-    b, _ = current_brand(update.effective_user.id)
-    return await show_team(update, ctx, b, edit=True)
+        await on_stale(update, ctx)
+        return
+    parts = q.data.split(":")
+    if parts[0] == "team":
+        if parts[1] == "new":
+            db.regen_token(b["id"])
+            b, _ = current_brand(update.effective_user.id)
+        await answer(update)
+        await show_team(update, ctx, b, edit=True)
+        return
+    uid = int(parts[1]) if parts[1].isdigit() else 0
+    r = next((x for x in db.team_stats(b["id"]) if x["tg_id"] == uid and x["role"] != "owner"), None)
+    if not r:
+        await answer(update)
+        await show_team(update, ctx, b, edit=True)
+        return
+    name = esc(person_name(r))
+    back = [Btn(tx(ctx, "b_team_back"), callback_data="team:show")]
+    if len(parts) > 2 and parts[2] == "del":
+        await answer(update)
+        await edit_or_say(update, tx(ctx, "member_del_confirm", name=name, brand=esc(b["kit"].get("name") or "—")),
+                          KB([[Btn(tx(ctx, "b_member_del_yes"), callback_data=f"tm:{uid}:delyes")], back]))
+        return
+    if len(parts) > 2 and parts[2] == "delyes":
+        db.remove_member(b["id"], uid)
+        db.regen_token(b["id"])
+        try:
+            await q.answer(tx(ctx, "member_removed"), show_alert=True)
+        except TelegramError:
+            pass
+        lang = (db.get_user(uid) or {}).get("lang", "ru")
+        try:
+            await ctx.bot.send_message(uid, _t(lang, "removed_notify", brand=esc(b["kit"].get("name") or "—")),
+                                       parse_mode=HTML)
+        except TelegramError:
+            pass
+        b, _ = current_brand(update.effective_user.id)
+        await show_team(update, ctx, b, edit=True)
+        return
+    await answer(update)
+    never = tx(ctx, "never")
+    text = tx(ctx, "member_card", name=name, user=(" @" + esc(r["username"])) if r.get("username") else "",
+              joined=fmt_date(r.get("joined_at")) if r.get("joined_at") else "—",
+              pm=r["photos_month"], po=r["posts_month"], pt=r["photos_total"],
+              last=fmt_date(r["last_post"]) if r.get("last_post") else never,
+              seen=fmt_date(r["last_seen"]) if r.get("last_seen") else never)
+    await edit_or_say(update, text, KB([[Btn(tx(ctx, "b_member_del"), callback_data=f"tm:{uid}:del")], back]))
 
 
 # ============ Онбординг: название → логотип → редактор ============
@@ -647,7 +735,8 @@ def pult_kb(ctx, d, tp):
         rows.append([Btn(tx(ctx, "b_lighter") if d["dark"] > 0 else "· · ·", callback_data="q:lighter"),
                      Btn(tx(ctx, "b_darker") if d["dark"] < last else "· · ·", callback_data="q:darker")])
     rows.append([Btn(tx(ctx, "b_q_text"), callback_data="q:text")])
-    rows.append([Btn(tx(ctx, "b_q_send", n=len(d["photos"])), callback_data="q:send")])
+    rows.append([Btn(tx(ctx, "b_q_send", n=len(d["photos"])), callback_data="q:send"),
+                 Btn(tx(ctx, "b_q_done") if d.get("sent") else tx(ctx, "b_q_cancel"), callback_data="q:done")])
     return KB(rows)
 
 
@@ -866,6 +955,12 @@ async def on_quick_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if head == "q" and arg == "send":
         await send_files(update, ctx, d, tp)
         return
+    if head == "q" and arg == "done":   # выйти из пульта: файлы остаются, пульт уходит
+        await answer(update)
+        ctx.user_data.pop("q", None)
+        await delete_ids(ctx.bot, q.message.chat_id, [q.message.message_id])
+        await show_menu(update, ctx)
+        return
     await answer(update)
 
 
@@ -939,16 +1034,18 @@ def admin_text(uid, b):
         return ("🛠 <b>Админ-панель</b>\nАктивного бренда нет. Создайте код /newcode и отправьте его боту.")
     lim = plan_limits(b)
     role = db.member_role(b["id"], uid)
-    active = db.plan_active(b)
+    active = db.plan_active(db.get_brand(b["root_id"]))
     return ("🛠 <b>Админ-панель</b>\n"
             f"Бренд: <b>{esc(b['kit'].get('name') or '—')}</b> #{b['id']}\n"
             f"Тариф: {PLAN_LABEL.get(b['plan'], b['plan'])} · до {fmt_date(b['plan_until'])} · "
-            f"{'✅ активен' if active else '⛔ истёк'}\n"
+            f"{'✅ активен' if active else '⛔ истёк'}"
+            f"{' · ⏸ этот бренд на паузе (нужен Studio)' if b.get('locked') else ''}\n"
             f"Фото в месяце: {db.photos_used(b['id'])} из {lim['photos']}\n"
-            f"Команда: {db.member_count(b['id'])} из {lim['members']}\n"
+            f"Людей в подписке: {db.sub_member_count(b['id'])} из {lim['members']}\n"
+            f"Брендов в подписке: {len(db.sub_brand_ids(b['id']))} из {lim['brands']}\n"
             f"Ваша роль: {'владелец' if role == 'owner' else 'участник'}\n\n"
-            "<i>Тарифы различаются лимитом фото и размером команды. "
-            "Переключение действует на ваш текущий бренд.</i>")
+            "<i>Тарифы различаются лимитом фото, людей и брендов (несколько брендов — только Studio). "
+            "Переключение действует на всю подписку текущего бренда.</i>")
 
 
 def admin_kb(uid, b):
@@ -1162,8 +1259,7 @@ def build_app(token=None):
             MessageHandler(filters.Regex(CODE_RE), on_code),
         ],
         states={
-            MENU: [CallbackQueryHandler(on_switch, pattern=r"^sw:\d+$"),
-                   CallbackQueryHandler(on_team, pattern="^team:new$")],
+            MENU: [CallbackQueryHandler(on_switch, pattern=r"^sw:\d+$")],
             CODE: [MessageHandler(TXT, on_code)],
             K_NAME: [MessageHandler(TXT, on_name)],
             K_LOGO: [MessageHandler(IMG, on_logo)],
@@ -1176,6 +1272,7 @@ def build_app(token=None):
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CallbackQueryHandler(on_admin, pattern="^adm:"))
+    app.add_handler(CallbackQueryHandler(on_team_cb, pattern="^(team|tm):"))
     app.add_handler(CommandHandler("desktop", cmd_desktop))
     app.add_handler(CommandHandler("newcode", cmd_newcode))
     app.add_handler(CommandHandler("codes", cmd_codes))

@@ -513,7 +513,16 @@ def draw_image_layer(canvas, L, ctx):
     if img is None:
         return None
     fit = L.get("fit", "box")
-    if fit == "stretch":
+    if fit == "band":   # полоса у края: во всю ширину (высоту), доля кадра сохраняется
+        side = L.get("side", "b")
+        frac = float(L.get("s", 0.3))
+        if side in ("t", "b"):
+            bh = max(1, int(round(frac * H)))
+            piece, left, top = img.resize((W, bh), Image.LANCZOS), 0, (0 if side == "t" else H - bh)
+        else:
+            bw = max(1, int(round(frac * W)))
+            piece, left, top = img.resize((bw, H), Image.LANCZOS), (0 if side == "l" else W - bw), 0
+    elif fit == "stretch":
         piece, left, top = img.resize((W, H), Image.LANCZOS), 0, 0
     elif fit == "cover":
         piece, left, top = fit_cover(img, W, H), 0, 0

@@ -122,7 +122,10 @@ def sanitize_layer(L):
         if not isinstance(L.get("asset"), str) or not _IMG.match(L["asset"]):
             return None
         out["asset"] = L["asset"]
-        out["fit"] = L.get("fit") if L.get("fit") in ("box", "cover", "stretch") else "box"
+        out["fit"] = L.get("fit") if L.get("fit") in ("box", "cover", "stretch", "band") else "box"
+        if out["fit"] == "band":
+            out["side"] = L.get("side") if L.get("side") in ("t", "b", "l", "r") else "b"
+            out["s"] = _num(L.get("s"), 0.01, 1, 0.3)
         _pos(L, out, "mc")
         out["w"] = _num(L.get("w"), 0.005, 2, 0.2)
         out["opacity"] = _num(L.get("opacity"), 0, 1, 1)

@@ -184,27 +184,52 @@ def segment(overlay, min_area=0.00015):
     return out
 
 
-def _piece_from(overlay, m, box):
-    x, y, w, h = (int(v) for v in box)
-    W, H = overlay.size
-    fit = "box"
+EDGE = 0.02      # касается края, если отстоит от него не больше чем на 2%
+
+
+def classify(box, W, H, fill, hint=""):
+    """Как элемент должен вести себя в другом формате.
+    → (fit, crop_box, side). fit: cover | stretch | band | box.
+    band — полоса у края во всю ширину (или высоту): сохраняет долю кадра,
+    поэтому градиент снизу закрывает те же 70% и в 4:5, и в 9:16."""
+    x, y, w, h = box
+    t, b = y <= EDGE * H, y + h >= H * (1 - EDGE)
+    l, r = x <= EDGE * W, x + w >= W * (1 - EDGE)
     if w >= 0.85 * W and h >= 0.85 * H:
-        filled = m[y:y + h, x:x + w].mean()
-        fit = "stretch" if filled < 0.25 else "cover"   # рамка тянется, заливка кадрируется
-        x, y, w, h = 0, 0, W, H                         # храним во весь кадр — с полями
+        return ("stretch" if fill < 0.25 else "cover"), (0, 0, W, H), ""
+    if w >= 0.95 * W and (t != b):
+        return "band", ((0, y, W, H - y) if b else (0, 0, W, y + h)), ("b" if b else "t")
+    if h >= 0.95 * H and (l != r):
+        return "band", ((x, 0, W - x, H) if r else (0, 0, x + w, H)), ("r" if r else "l")
+    return "box", box, ""
+
+
+def _piece_from(overlay, m, box):
+    W, H = overlay.size
+    x, y, w, h = (int(v) for v in box)
+    fit, crop, side = classify((x, y, w, h), W, H, float(m[y:y + h, x:x + w].mean()))
+    x, y, w, h = (int(round(v)) for v in crop)
     arr = np.array(overlay.crop((x, y, x + w, y + h)))
     arr[..., 3] = np.where(m[y:y + h, x:x + w], arr[..., 3], 0)
     buf = io.BytesIO()
     Image.fromarray(arr, "RGBA").save(buf, "PNG", optimize=True)
-    return Piece(buf.getvalue(), (x, y, w, h), "", fit)
+    return Piece(buf.getvalue(), (x, y, w, h), side, fit)
 
 
 # ============ Сборка шаблона ============
 def _anchor_for(box, W, H, hint=""):
+    """Якорь элемента. Подсказка Figma (constraints) важнее; затем касание края;
+    затем треть кадра, в которой лежит центр."""
     x, y, w, h = box
     cx, cy = x + w / 2, y + h / 2
-    hz = hint[1] if len(hint) == 2 else ("l" if cx < W / 3 else ("r" if cx > 2 * W / 3 else "c"))
-    v = hint[0] if len(hint) == 2 else ("t" if cy < H / 3 else ("b" if cy > 2 * H / 3 else "m"))
+    t, b = y <= EDGE * H, y + h >= H * (1 - EDGE)
+    l, r = x <= EDGE * W, x + w >= W * (1 - EDGE)
+    hv = hint[0] if len(hint) == 2 and hint[0] in "tmb" else ""
+    hh = hint[1] if len(hint) == 2 and hint[1] in "lcr" else ""
+    v = hv or ("b" if b and not t else "t" if t and not b else
+               ("t" if cy < H / 3 else ("b" if cy > 2 * H / 3 else "m")))
+    hz = hh or ("c" if (l and r) else "l" if l else "r" if r else
+                ("l" if cx < W / 3 else ("r" if cx > 2 * W / 3 else "c")))
     ax = x / W if hz == "l" else ((W - x - w) / W if hz == "r" else (cx - W / 2) / W)
     ay = y / W if v == "t" else ((H - y - h) / W if v == "b" else (cy - H / 2) / W)
     return v + hz, round(ax, 4), round(ay, 4)
@@ -260,6 +285,13 @@ def build(layout, customs=None, customs_names=None):
         if p.fit in ("cover", "stretch"):
             layers.append({"type": "image", "asset": aid, "fit": p.fit, "anchor": "mc", "x": 0, "y": 0,
                            "w": 1, "opacity": 1, "name": "Графика"})
+            continue
+        if p.fit == "band":
+            side = p.anchor or "b"
+            frac = p.box[3] / H if side in "tb" else p.box[2] / W
+            layers.append({"type": "image", "asset": aid, "fit": "band", "side": side,
+                           "s": round(min(1.0, frac), 4), "anchor": "mc", "x": 0, "y": 0, "w": 1,
+                           "opacity": 1, "name": "Графика"})
             continue
         anchor, x, y = _anchor_for(p.box, W, H, p.anchor)
         layers.append({"type": "image", "asset": aid, "fit": "box", "anchor": anchor, "x": x, "y": y,
@@ -525,10 +557,11 @@ def _fig_box(n, x0, y0, render=False):
 
 
 def _fig_anchor(n):
+    """Constraints Figma → подсказка якоря по осям; «?» — ось определить автоматически."""
     c = n.get("constraints") or {}
-    hz = {"LEFT": "l", "RIGHT": "r", "CENTER": "c"}.get(c.get("horizontal"), "")
-    v = {"TOP": "t", "BOTTOM": "b", "CENTER": "m"}.get(c.get("vertical"), "")
-    return v + hz if hz and v else ""
+    hz = {"LEFT": "l", "RIGHT": "r", "CENTER": "c"}.get(c.get("horizontal"), "?")
+    v = {"TOP": "t", "BOTTOM": "b", "CENTER": "m"}.get(c.get("vertical"), "?")
+    return v + hz
 
 
 def _fig_image_fill(n):
@@ -619,15 +652,17 @@ def figma_assemble(plan, images):
         x, y, w, h = r["box"]
         if w >= 1 and h >= 1 and (abs(img.width - w) > 1 or abs(img.height - h) > 1):
             img = img.resize((max(1, round(w)), max(1, round(h))), Image.LANCZOS)
-        fit = "box"
-        if w >= 0.85 * plan["W"] and h >= 0.85 * plan["H"]:
-            fit = "stretch" if (np.asarray(img.split()[3]) > 8).mean() < 0.25 else "cover"
-            full = Image.new("RGBA", (plan["W"], plan["H"]), (0, 0, 0, 0))
+        Wp, Hp = plan["W"], plan["H"]
+        fill = float((np.asarray(img.split()[3]) > 8).mean())
+        fit, crop, side = classify((x, y, w, h), Wp, Hp, fill, r["anchor"])
+        if fit != "box":
+            full = Image.new("RGBA", (Wp, Hp), (0, 0, 0, 0))
             full.alpha_composite(img, (max(0, round(x)), max(0, round(y))))
-            img, (x, y, w, h) = full, (0, 0, plan["W"], plan["H"])
+            cx, cy, cw, ch = (int(round(v)) for v in crop)
+            img, (x, y, w, h) = full.crop((cx, cy, cx + cw, cy + ch)), (cx, cy, cw, ch)
         buf = io.BytesIO()
         img.save(buf, "PNG", optimize=True)
-        lay.pieces.append(Piece(buf.getvalue(), (x, y, w, h), r["anchor"], fit))
+        lay.pieces.append(Piece(buf.getvalue(), (x, y, w, h), side if fit == "band" else r["anchor"], fit))
     lay.slots = [Slot(**s) for s in plan["slots"]]
     lay.logos = [LogoSlot(lg["asset"], lg["box"]) for lg in plan["logos"]]
     return lay

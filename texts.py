@@ -48,6 +48,13 @@ T = {
     "b_code":     {"ru": "➕ Ввести код", "en": "➕ Enter code"},
     "b_lang":     {"ru": "🌐 English", "en": "🌐 Русский"},
     "switch_head": {"ru": "Выберите бренд:", "en": "Choose a brand:"},
+    "b_add_brand": {"ru": "➕ Добавить бренд", "en": "➕ Add brand"},
+    "brands_count": {"ru": "Брендов в подписке: {n} из {limit}", "en": "Brands in the subscription: {n} of {limit}"},
+    "brand_limit": {"ru": "В подписке уже максимум брендов.", "en": "The subscription already has the maximum number of brands."},
+    "menu_locked": {"ru": "⏸ Бренд на паузе: несколько брендов доступны на тарифе Studio. Напишите {support}.",
+                    "en": "⏸ This brand is paused: multiple brands are available on the Studio plan. Contact {support}."},
+    "b_q_done":   {"ru": "✔️ Готово", "en": "✔️ Done"},
+    "b_q_cancel": {"ru": "✕ Отмена", "en": "✕ Cancel"},
 
     # ---------- Мастер бренд-кита ----------
     "step":       {"ru": "<i>Шаг {n} из 3</i>\n", "en": "<i>Step {n} of 3</i>\n"},
@@ -115,10 +122,29 @@ T = {
                        "en": "Only the brand owner can edit the brand kit."},
 
     # ---------- Команда ----------
-    "team_head": {"ru": "<b>Команда · {brand}</b>\nУчастников: {n} из {limit}\n\n"
-                        "Отправьте эту ссылку коллегам — они смогут делать посты в вашем стиле:\n{link}",
-                  "en": "<b>Team · {brand}</b>\nMembers: {n} of {limit}\n\n"
-                        "Share this link with colleagues — they'll be able to make posts in your style:\n{link}"},
+    "team_head": {"ru": "👥 <b>Команда · {brand}</b>\nЛюдей в подписке: {n} из {limit}\n\n"
+                        "Ссылка-приглашение открывает доступ <b>только к этому бренду</b>:\n{link}",
+                  "en": "👥 <b>Team · {brand}</b>\nPeople in the subscription: {n} of {limit}\n\n"
+                        "This invite link gives access <b>to this brand only</b>:\n{link}"},
+    "team_activity": {"ru": "\n\n<b>Активность за месяц</b>", "en": "\n\n<b>Activity this month</b>"},
+    "team_line":  {"ru": "{name} — {photos} фото, постов: {posts}", "en": "{name} — {photos} photos, posts: {posts}"},
+    "team_owner_mark": {"ru": " (владелец)", "en": " (owner)"},
+    "team_empty": {"ru": "\nПока никого, кроме вас. Отправьте ссылку коллегам.",
+                   "en": "\nNobody but you yet. Send the link to your colleagues."},
+    "member_card": {"ru": "👤 <b>{name}</b>{user}\nВ бренде с {joined}\nЗа месяц: {pm} фото, постов: {po}\n"
+                          "Всего фото: {pt}\nПоследний пост: {last}\nЗаходил(а) в бота: {seen}",
+                    "en": "👤 <b>{name}</b>{user}\nIn this brand since {joined}\nThis month: {pm} photos, posts: {po}\n"
+                          "Photos in total: {pt}\nLast post: {last}\nLast seen in the bot: {seen}"},
+    "b_member_del": {"ru": "🗑 Убрать из бренда", "en": "🗑 Remove from brand"},
+    "member_del_confirm": {"ru": "Убрать <b>{name}</b> из бренда <b>{brand}</b>? Ссылка-приглашение обновится, "
+                                 "чтобы вернуться по старой было нельзя.",
+                           "en": "Remove <b>{name}</b> from <b>{brand}</b>? The invite link will be renewed "
+                                 "so the old one stops working."},
+    "b_member_del_yes": {"ru": "Да, убрать", "en": "Yes, remove"},
+    "member_removed": {"ru": "Участник убран, ссылка обновлена", "en": "Member removed, link renewed"},
+    "removed_notify": {"ru": "Вас отключили от бренда <b>{brand}</b>.", "en": "You've been removed from <b>{brand}</b>."},
+    "b_team_back": {"ru": "‹ Команда", "en": "‹ Team"},
+    "never":      {"ru": "не было", "en": "never"},
     "b_team_new": {"ru": "🔄 Новая ссылка (старая перестанет работать)",
                    "en": "🔄 New link (old one stops working)"},
     "team_owner_only": {"ru": "Приглашать в команду может только владелец бренда.",

@@ -664,7 +664,12 @@ function drawImageLayer(ctx, L, env) {
   ctx.globalAlpha = L.opacity ?? 1;
   ctx.imageSmoothingQuality = "high";
   let box;
-  if (L.fit === "stretch") { ctx.drawImage(img, 0, 0, W, H); box = [0, 0, W, H]; }
+  if (L.fit === "band") {
+    const side = L.side || "b", f = L.s ?? 0.3;
+    if (side === "t" || side === "b") { const bh = Math.max(1, Math.round(f * H)); box = [0, side === "t" ? 0 : H - bh, W, bh]; }
+    else { const bw = Math.max(1, Math.round(f * W)); box = [side === "l" ? 0 : W - bw, 0, bw, H]; }
+    ctx.drawImage(img, ...box);
+  } else if (L.fit === "stretch") { ctx.drawImage(img, 0, 0, W, H); box = [0, 0, W, H]; }
   else if (L.fit === "cover") { drawPhoto(ctx, img, W, H); box = [0, 0, W, H]; }
   else {
     const w = Math.max(1, Math.round((L.w ?? 0.2) * W));
@@ -1549,6 +1554,10 @@ function renderLayerProps() {
     add(colorCtl(t("color"), () => L.color, c => { L.color = c; markDirty(); }));
     add(slider(t("opacity"), () => L.opacity, v => L.opacity = v, 0, 0.9, 0.01, pct));
   } else if (L.type === "image") {
+    if (L.fit === "band") {
+      add(seg(t("side"), [["t", t("top")], ["b", t("bottom")], ["l", t("left")], ["r", t("right")]], () => L.side, v => L.side = v));
+      add(slider(t("extent"), () => L.s, v => L.s = v, 0.02, 1, 0.01, pct));
+    } else
     add(seg(t("fitImg"), [["box", t("fitBox")], ["cover", t("fitCover")], ["stretch", t("fitStretch")]], () => L.fit || "box", v => L.fit = v, true));
     if ((L.fit || "box") === "box") {
       add(...posCtls(L));

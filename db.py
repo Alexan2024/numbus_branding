@@ -35,11 +35,12 @@ DB_PATH = os.environ.get("NUMBUS_DB") or os.path.join(DATA_DIR, "numbus.db")
 # ============ Тарифы ============
 # photos — лимит обработанных фото в календарный месяц (UTC)
 # members — сколько человек в команде бренда (включая владельца)
+# brands — сколько брендов в одной подписке. Лимиты фото и людей — на всю подписку.
 PLANS = {
-    "pilot":  {"photos": 500,  "members": 5},
-    "solo":   {"photos": 150,  "members": 1},
-    "media":  {"photos": 1000, "members": 5},
-    "studio": {"photos": 5000, "members": 20},
+    "pilot":  {"photos": 500,  "members": 5,  "brands": 1},
+    "solo":   {"photos": 150,  "members": 1,  "brands": 1},
+    "media":  {"photos": 1000, "members": 5,  "brands": 1},
+    "studio": {"photos": 5000, "members": 20, "brands": 10},
 }
 
 DEFAULT_KIT = {
@@ -138,9 +139,23 @@ def _conn():
     return c
 
 
+MIGRATIONS = [
+    "ALTER TABLE brands ADD COLUMN sub_id INTEGER",        # подписка: id корневого бренда
+    "ALTER TABLE users ADD COLUMN name TEXT",
+    "ALTER TABLE users ADD COLUMN username TEXT",
+    "ALTER TABLE users ADD COLUMN last_seen TEXT",
+    "ALTER TABLE members ADD COLUMN joined_at TEXT",
+]
+
+
 def init_db():
     with _conn() as c:
         c.executescript(SCHEMA)
+        for sql in MIGRATIONS:
+            try:
+                c.execute(sql)
+            except sqlite3.OperationalError:
+                pass   # колонка уже есть
     logger.info("БД: %s (%s)", DB_PATH, "постоянная" if STORAGE_PERSISTENT else "ВРЕМЕННАЯ")
 
 
@@ -174,6 +189,8 @@ def set_active_brand(tg_id: int, brand_id):
 
 # ============ Бренды ============
 def _brand_row(row) -> dict:
+    """Бренд с тарифом подписки. Дочерний бренд (sub_id) берёт тариф и срок у корня;
+    если тариф корня не допускает несколько брендов — дочерний бренд заблокирован."""
     b = dict(row)
     kit = dict(DEFAULT_KIT)
     try:
@@ -181,18 +198,47 @@ def _brand_row(row) -> dict:
     except Exception:
         pass
     b["kit"] = kit
+    root = b.get("sub_id")
+    b["root_id"] = root or b["id"]
+    b["locked"] = False
+    if root and root != b["id"]:
+        with _conn() as c:
+            r = c.execute("SELECT plan, plan_until FROM brands WHERE id=?", (root,)).fetchone()
+        if r:
+            b["plan"], b["plan_until"] = r["plan"], r["plan_until"]
+            b["locked"] = PLANS.get(r["plan"], PLANS["pilot"])["brands"] <= 1
     return b
 
 
-def create_brand(owner_id: int, plan: str, days: int) -> int:
+def root_id(brand_id: int) -> int:
+    with _conn() as c:
+        r = c.execute("SELECT sub_id FROM brands WHERE id=?", (brand_id,)).fetchone()
+    return (r["sub_id"] if r and r["sub_id"] else brand_id)
+
+
+def sub_brand_ids(brand_id: int) -> list:
+    rid = root_id(brand_id)
+    with _conn() as c:
+        return [r["id"] for r in c.execute(
+            "SELECT id FROM brands WHERE id=? OR sub_id=? ORDER BY id", (rid, rid))]
+
+
+def sub_brands(brand_id: int) -> list:
+    return [get_brand(i) for i in sub_brand_ids(brand_id)]
+
+
+def create_brand(owner_id: int, plan: str, days: int, sub_id: int = None) -> int:
+    """sub_id — добавить бренд в существующую подписку (тариф и срок берутся у неё)."""
     until = (_now() + timedelta(days=days)).isoformat()
     with _conn() as c:
         cur = c.execute(
-            "INSERT INTO brands (owner_id, kit, plan, plan_until, join_token, created_at) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO brands (owner_id, kit, plan, plan_until, join_token, created_at, sub_id) "
+            "VALUES (?,?,?,?,?,?,?)",
             (owner_id, json.dumps(DEFAULT_KIT, ensure_ascii=False), plan, until,
-             secrets.token_urlsafe(9), _now().isoformat()))
+             secrets.token_urlsafe(9), _now().isoformat(), sub_id))
         bid = cur.lastrowid
-        c.execute("INSERT INTO members (brand_id, tg_id, role) VALUES (?,?,?)", (bid, owner_id, "owner"))
+        c.execute("INSERT INTO members (brand_id, tg_id, role, joined_at) VALUES (?,?,?,?)",
+                  (bid, owner_id, "owner", _now().isoformat()))
         c.execute("UPDATE users SET active_brand=? WHERE tg_id=?", (bid, owner_id))
     seed_templates(bid)
     return bid
@@ -248,8 +294,26 @@ def brand_by_token(token: str):
 
 def add_member(brand_id: int, tg_id: int, role: str = "editor"):
     with _conn() as c:
-        c.execute("INSERT OR IGNORE INTO members (brand_id, tg_id, role) VALUES (?,?,?)",
-                  (brand_id, tg_id, role))
+        c.execute("INSERT OR IGNORE INTO members (brand_id, tg_id, role, joined_at) VALUES (?,?,?,?)",
+                  (brand_id, tg_id, role, _now().isoformat()))
+
+
+def remove_member(brand_id: int, tg_id: int):
+    """Убирает человека из одного бренда. Если это был его активный бренд — переключает."""
+    with _conn() as c:
+        c.execute("DELETE FROM members WHERE brand_id=? AND tg_id=? AND role != 'owner'", (brand_id, tg_id))
+        u = c.execute("SELECT active_brand FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+        if u and u["active_brand"] == brand_id:
+            nxt = c.execute("SELECT brand_id FROM members WHERE tg_id=? ORDER BY brand_id LIMIT 1", (tg_id,)).fetchone()
+            c.execute("UPDATE users SET active_brand=? WHERE tg_id=?", (nxt["brand_id"] if nxt else None, tg_id))
+
+
+def sub_member_count(brand_id: int) -> int:
+    """Сколько разных людей во всех брендах подписки (с владельцем)."""
+    ids = sub_brand_ids(brand_id)
+    with _conn() as c:
+        return c.execute("SELECT COUNT(DISTINCT tg_id) FROM members WHERE brand_id IN (%s)"
+                         % ",".join("?" * len(ids)), ids).fetchone()[0]
 
 
 def list_brands() -> list:
@@ -259,6 +323,7 @@ def list_brands() -> list:
 
 
 def extend_brand(brand_id: int, days: int, plan: str = None) -> bool:
+    brand_id = root_id(brand_id) if get_brand(brand_id) else brand_id
     b = get_brand(brand_id)
     if not b:
         return False
@@ -275,6 +340,8 @@ def extend_brand(brand_id: int, days: int, plan: str = None) -> bool:
 
 
 def plan_active(brand: dict) -> bool:
+    if brand.get("locked"):
+        return False
     try:
         return datetime.fromisoformat(brand["plan_until"]) > _now()
     except Exception:
@@ -338,9 +405,11 @@ def month_start():
 
 
 def photos_used(brand_id: int) -> int:
+    """Фото за месяц по всей подписке (все её бренды)."""
+    ids = sub_brand_ids(brand_id)
     with _conn() as c:
-        return c.execute("SELECT COALESCE(SUM(photos),0) FROM events WHERE brand_id=? AND ts>=?",
-                         (brand_id, month_start().isoformat())).fetchone()[0]
+        return c.execute("SELECT COALESCE(SUM(photos),0) FROM events WHERE brand_id IN (%s) AND ts>=?"
+                         % ",".join("?" * len(ids)), (*ids, month_start().isoformat())).fetchone()[0]
 
 
 def record_event(brand_id: int, tg_id: int, template: str, photos: int):
@@ -512,6 +581,7 @@ def drop_session(tok: str):
 # ============ Админ: режимы подписки для проверки ============
 def set_plan(brand_id: int, plan: str) -> bool:
     """Меняет тариф; если подписка уже истекла — заодно продлевает на 30 дней."""
+    brand_id = root_id(brand_id)
     b = get_brand(brand_id)
     if not b or plan not in PLANS:
         return False
@@ -523,15 +593,17 @@ def set_plan(brand_id: int, plan: str) -> bool:
 
 
 def expire_brand(brand_id: int):
+    brand_id = root_id(brand_id)
     with _conn() as c:
         c.execute("UPDATE brands SET plan_until=? WHERE id=?",
                   ((_now() - timedelta(days=1)).isoformat(), brand_id))
 
 
 def reset_usage(brand_id: int):
-    """Обнуляет счётчик фото за текущий месяц."""
+    """Обнуляет счётчик фото за текущий месяц (всей подписки)."""
     with _conn() as c:
-        c.execute("DELETE FROM events WHERE brand_id=? AND ts>=?", (brand_id, month_start().isoformat()))
+        for bid in sub_brand_ids(brand_id):
+            c.execute("DELETE FROM events WHERE brand_id=? AND ts>=?", (bid, month_start().isoformat()))
 
 
 def set_member_role(brand_id: int, tg_id: int, role: str):
@@ -564,3 +636,29 @@ def chat_msgs(chat_id: int, with_results=False) -> list:
         c.execute("DELETE FROM msglog WHERE ts < ?", (cutoff,))
         q = "SELECT msg_id FROM msglog WHERE chat_id=?" + ("" if with_results else " AND kind != 'result'")
         return [r["msg_id"] for r in c.execute(q + " ORDER BY msg_id", (chat_id,))]
+
+
+# ============ Команда: имена и активность ============
+def touch_user(tg_id: int, name: str, username: str):
+    with _conn() as c:
+        c.execute("UPDATE users SET name=?, username=?, last_seen=? WHERE tg_id=?",
+                  ((name or "")[:64], (username or "")[:64], _now().isoformat(), tg_id))
+
+
+def team_stats(brand_id: int) -> list:
+    """Участники бренда и их активность в этом бренде."""
+    ms = month_start().isoformat()
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT m.tg_id, m.role, m.joined_at, u.name, u.username, u.last_seen,
+                   COALESCE(SUM(CASE WHEN e.ts >= ? THEN e.photos END), 0) AS photos_month,
+                   COALESCE(SUM(CASE WHEN e.ts >= ? THEN 1 END), 0)        AS posts_month,
+                   COALESCE(SUM(e.photos), 0)                              AS photos_total,
+                   MAX(e.ts)                                               AS last_post
+            FROM members m
+            LEFT JOIN users u ON u.tg_id = m.tg_id
+            LEFT JOIN events e ON e.brand_id = m.brand_id AND e.tg_id = m.tg_id
+            WHERE m.brand_id = ?
+            GROUP BY m.tg_id
+            ORDER BY (m.role = 'owner') DESC, photos_month DESC, m.joined_at""", (ms, ms, brand_id)).fetchall()
+    return [dict(r) for r in rows]
