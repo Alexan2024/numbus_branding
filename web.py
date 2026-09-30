@@ -3,7 +3,8 @@
 Работает в том же процессе, что и бот. Каждый запрос к /api подписан
 Telegram: заголовок X-Init-Data проверяется HMAC-ом по токену бота
 (https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app).
-Редактировать может только владелец бренда.
+С компьютера вход — по одноразовой ссылке из бота (заголовок X-Session).
+Редактировать могут владелец бренда и дизайнер.
 """
 import os
 import io
@@ -14,6 +15,7 @@ import time
 import asyncio
 import hashlib
 import logging
+from collections import deque
 from urllib.parse import parse_qsl
 
 import aiohttp
@@ -35,6 +37,39 @@ FIGMA_API = "https://api.figma.com/v1"
 UPLOAD_KINDS = {"logo", "logo_alt", "sample", "image"} | set(R.CUSTOM_FONT_SLOTS)
 _SEM = asyncio.Semaphore(2)
 _DEFAULT_SAMPLE = None
+
+# Сколько тяжёлых запросов можно за окно (секунд) одному человеку
+LIMITS = {"preview": (40, 60), "upload": (30, 60), "import": (8, 300), "login": (20, 60)}
+
+
+class Limiter:
+    """Скользящее окно в памяти: хватает на один процесс бота."""
+
+    def __init__(self):
+        self.hits = {}
+
+    def allow(self, key, limit, per):
+        now = time.monotonic()
+        q = self.hits.get(key)
+        if q is None:
+            if len(self.hits) > 5000:          # чистим пустые окна, чтобы словарь не рос
+                for k in [k for k, v in self.hits.items() if not v or now - v[-1] > 600]:
+                    self.hits.pop(k, None)
+            q = self.hits[key] = deque()
+        while q and now - q[0] > per:
+            q.popleft()
+        if len(q) >= limit:
+            return False
+        q.append(now)
+        return True
+
+
+LIMITER = Limiter()
+
+
+def rate_ok(request, kind, who=None):
+    limit, per = LIMITS[kind]
+    return LIMITER.allow((who if who is not None else request.get("uid"), kind), limit, per)
 
 
 def check_init_data(init_data: str, token: str):
@@ -67,12 +102,26 @@ def jerr(status, code):
     return web.json_response({"error": code}, status=status)
 
 
+def resolve_brand(uid, bid):
+    """Бренд из адреса; без него (кнопка меню бота) — активный бренд человека,
+    иначе первый, где он владелец или дизайнер. None — редактировать нечего."""
+    if bid:
+        return bid if db.can_edit(bid, uid) else None
+    ab = (db.get_user(uid) or {}).get("active_brand")
+    if ab and db.can_edit(ab, uid):
+        return ab
+    for b in db.user_brands(uid):
+        if b["role"] in db.EDITOR_ROLES:
+            return b["id"]
+    return None
+
+
 @web.middleware
 async def auth_mw(request, handler):
     if not request.path.startswith("/api/"):
         return await handler(request)
     try:
-        bid = int(request.query.get("b", "0"))
+        bid = int(request.query.get("b") or 0)
     except ValueError:
         return jerr(400, "brand")
     user = check_init_data(request.headers.get("X-Init-Data", ""), request.app["token"])
@@ -81,20 +130,39 @@ async def auth_mw(request, handler):
     else:
         # Вход с компьютера: сессия, выданная по одноразовой ссылке из бота
         sess = db.check_session(request.headers.get("X-Session", ""))
-        if not sess or sess[1] != bid:
+        if not sess or (bid and sess[1] != bid):
             return jerr(401, "auth")
-        uid = sess[0]
-    if db.member_role(bid, uid) != "owner":
+        uid, bid = sess[0], sess[1]
+    resolved = resolve_brand(uid, bid)
+    if not resolved:
+        # участник без прав редактора или человек не из команды
         return jerr(403, "owner_only")
     request["uid"] = uid
-    request["bid"] = bid
+    request["bid"] = resolved
+    request["role"] = db.member_role(resolved, uid)
     request["lang"] = (db.get_user(uid) or {}).get("lang", "ru")
     return await handler(request)
+
+
+@web.middleware
+async def headers_mw(request, handler):
+    resp = await handler(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    return resp
 
 
 # ============ Статика ============
 async def index(request):
     return web.FileResponse(WEBAPP_FILE, headers={"Cache-Control": "no-cache"})
+
+
+STATUS = {"telegram": "подключаюсь"}      # бот обновляет: ok | нет связи
+
+
+async def healthz(request):
+    """Жив ли сервер. 200 даже без связи с Telegram — бот сам переподключится."""
+    return web.json_response({"web": "ok", **STATUS})
 
 
 _FONT_FILES = {v["file"] for v in R.FONTS.values()}
@@ -118,18 +186,35 @@ def _fonts_public(kit):
     return out
 
 
+def _font_missing(bid, kit):
+    """Каких нужных знаков нет в своих шрифтах бренда (их нарисует Inter)."""
+    out = {}
+    for slot in (kit.get("custom_fonts") or {}):
+        data = db.get_asset(bid, slot)
+        cov = R.font_cover(slot, {slot: data}) if data else None
+        out[slot] = "".join(ch for ch in R.CHECK_CHARS if cov is not None and ord(ch) not in cov)
+    return out
+
+
 async def api_state(request):
     bid = request["bid"]
     b = db.get_brand(bid)
     kit = b["kit"]
+    lang = request["lang"]
+    db.log_event("editor_open", request["uid"], bid, role=request["role"])
     return web.json_response({
         "brand": {"id": bid, "name": kit.get("name") or "", "palette": S.sanitize_palette(kit.get("palette")),
                   "hashtags": kit.get("hashtags") or [], "custom_fonts": kit.get("custom_fonts") or {}},
+        "role": request["role"],
         "assets": {k: db.has_asset(bid, k) for k in ("logo", "logo_alt", "sample")},
         "fonts": _fonts_public(kit),
         "templates": [{"id": t["id"], "name": t["name"], "spec": t["spec"]} for t in db.list_templates(bid)],
-        "presets": S.presets_public(request["lang"]),
-        "lang": request["lang"],
+        "presets": S.presets_public(lang),
+        "palette_roles": S.PALETTE_ROLES.get(lang) or S.PALETTE_ROLES["ru"],
+        "recent_titles": db.recent_titles(bid),
+        "font_missing": _font_missing(bid, kit),
+        "safe": {"margin": S.MARGIN, "story_top": S.STORY_TOP, "story_bottom": S.STORY_BOTTOM},
+        "lang": lang,
         "max_templates": db.MAX_TEMPLATES,
     })
 
@@ -139,6 +224,8 @@ async def api_kit(request):
     try:
         body = await request.json()
     except Exception:
+        return jerr(400, "json")
+    if not isinstance(body, dict):
         return jerr(400, "json")
     changes = {}
     if "name" in body:
@@ -157,7 +244,10 @@ async def api_kit(request):
         changes["hashtags"] = tags[:16]
     if changes:
         db.update_kit(bid, **changes)
-    return web.json_response({"ok": True})
+    kit = db.get_brand(bid)["kit"]
+    return web.json_response({"ok": True, "brand": {
+        "name": kit.get("name") or "", "palette": S.sanitize_palette(kit.get("palette")),
+        "hashtags": kit.get("hashtags") or []}})
 
 
 # ============ Ассеты ============
@@ -193,6 +283,18 @@ async def api_font(request):
     return web.Response(body=data, content_type="font/ttf")
 
 
+async def api_logo_colors(request):
+    """Фирменные цвета, найденные в логотипе — для кнопки «Взять из логотипа»."""
+    data = db.get_asset(request["bid"], "logo")
+    if not data:
+        return web.json_response({"colors": []})
+    try:
+        colors = await heavy(R.logo_colors, data, 3)
+    except Exception:
+        colors = []
+    return web.json_response({"colors": colors})
+
+
 def _prep_sample(data):
     img = R.open_photo(data)
     img.thumbnail((1600, 1600), Image.LANCZOS)
@@ -208,10 +310,21 @@ def _prep_layer_image(data):
     return "img_" + hashlib.sha1(png).hexdigest()[:12], png
 
 
+def _prep_logo(data):
+    png, had_alpha = R.prepare_logo(data)
+    try:
+        colors = R.logo_colors(png, 3)
+    except Exception:
+        colors = []
+    return png, had_alpha, colors
+
+
 async def api_upload(request):
     bid, kind = request["bid"], request.match_info["kind"]
     if kind not in UPLOAD_KINDS:
         return jerr(400, "kind")
+    if not rate_ok(request, "upload"):
+        return jerr(429, "rate")
     reader = await request.multipart()
     part = await reader.next()
     if part is None or part.name != "file":
@@ -222,13 +335,16 @@ async def api_upload(request):
         return jerr(400, "empty")
     if kind in ("logo", "logo_alt"):
         try:
-            png, had_alpha = await heavy(R.prepare_logo, data)
+            png, had_alpha, colors = await heavy(_prep_logo, data)
+        except R.TooBig:
+            return jerr(422, "logo_big")
         except ValueError:
             return jerr(422, "logo_empty")
         except Exception:
             return jerr(422, "logo_bad")
         db.set_asset(bid, kind, png)
-        return web.json_response({"ok": True, "bg_removed": not had_alpha})
+        db.log_event("kit_logo", request["uid"], bid, where="editor", slot=kind)
+        return web.json_response({"ok": True, "bg_removed": not had_alpha, "colors": colors})
     if kind == "image":
         try:
             aid, png = await heavy(_prep_layer_image, data)
@@ -251,7 +367,8 @@ async def api_upload(request):
     fonts = dict(kit.get("custom_fonts") or {})
     fonts[kind] = R.font_name(data, os.path.splitext(filename)[0] or kind)
     db.update_kit(bid, custom_fonts=fonts)
-    return web.json_response({"ok": True, "name": fonts[kind]})
+    # каких знаков нет — их нарисует запасной шрифт; редактор предупредит
+    return web.json_response({"ok": True, "name": fonts[kind], "missing": R.missing_chars(data)})
 
 
 async def api_asset_delete(request):
@@ -272,29 +389,36 @@ async def _body_tpl(request):
     try:
         body = await request.json()
     except Exception:
-        return None, None
-    name = str(body.get("name") or "").strip()[:40] or "Шаблон"
-    return name, S.sanitize_spec(body.get("spec"))
+        return None, None, None
+    if not isinstance(body, dict):
+        return None, None, None
+    fallback = "Шаблон" if request["lang"] == "ru" else "Template"
+    name = str(body.get("name") or "").strip()[:40] or fallback
+    return name, S.sanitize_spec(body.get("spec")), body
 
 
 async def api_tpl_create(request):
-    name, spec = await _body_tpl(request)
+    name, spec, body = await _body_tpl(request)
     if spec is None:
         return jerr(400, "json")
     tid = db.create_template(request["bid"], name, spec)
     if not tid:
         return jerr(409, "limit")
+    src = str(body.get("from") or "")[:20]
+    db.log_event("tpl_create", request["uid"], request["bid"], tid=tid, src=src, role=request["role"])
     return web.json_response({"id": tid, "name": name, "spec": spec})
 
 
 async def api_tpl_update(request):
-    name, spec = await _body_tpl(request)
+    name, spec, body = await _body_tpl(request)
     if spec is None:
         return jerr(400, "json")
-    if not db.update_template(request["bid"], int(request.match_info["tid"]), name, spec):
+    tid = int(request.match_info["tid"])
+    if not db.update_template(request["bid"], tid, name, spec):
         return jerr(404, "template")
     db.gc_images(request["bid"])
-    return web.json_response({"id": int(request.match_info["tid"]), "name": name, "spec": spec})
+    db.log_event("tpl_save", request["uid"], request["bid"], tid=tid, role=request["role"])
+    return web.json_response({"id": tid, "name": name, "spec": spec})
 
 
 async def api_tpl_delete(request):
@@ -315,7 +439,7 @@ def image_loader(bid):
     return load
 
 
-def brand_ctx(bid, fields=None, dark=0.0):
+def brand_ctx(bid, fields=None, dark=0.0, focus=None):
     b = db.get_brand(bid)
     kit = b["kit"]
     logos = {}
@@ -324,7 +448,8 @@ def brand_ctx(bid, fields=None, dark=0.0):
         if data:
             logos[k] = Image.open(io.BytesIO(data)).convert("RGBA")
     customs = {slot: db.get_asset(bid, slot) for slot in (kit.get("custom_fonts") or {})}
-    return R.Ctx(S.sanitize_palette(kit.get("palette")), logos, customs, fields or {}, dark, image_loader(bid))
+    return R.Ctx(S.sanitize_palette(kit.get("palette")), logos, customs, fields or {}, dark,
+                 image_loader(bid), focus)
 
 
 def _server_preview(bid, spec, surface, fmt, fields):
@@ -340,16 +465,29 @@ def _server_preview(bid, spec, surface, fmt, fields):
     return R.to_preview(R.render_surface(photo, W, H, layers, ctx), 1400)
 
 
+def _int(v, lo, hi, default):
+    try:
+        return max(lo, min(hi, int(v)))
+    except (TypeError, ValueError):
+        return default
+
+
 async def api_preview(request):
     """Точный рендер движком бота — то, что клиент получит в итоге."""
+    if not rate_ok(request, "preview"):
+        return jerr(429, "rate")
     try:
         body = await request.json()
     except Exception:
         return jerr(400, "json")
+    if not isinstance(body, dict):
+        return jerr(400, "json")
     spec = S.sanitize_spec(body.get("spec"))
     f = body.get("fields") if isinstance(body.get("fields"), dict) else {}
     fields = {k: str(f.get(k) or "")[:300] for k in ("title", "subtitle", "hashtag")}
-    fields.update(i=1, n=8)
+    # i/n — какой слайд карусели показать: обложку (1) или следующий (2)
+    n = _int(body.get("n"), 1, 20, 8)
+    fields.update(i=_int(body.get("i"), 1, n, 1), n=n)
     fmt = body.get("fmt") if body.get("fmt") in R.FEED_SIZES else "4:5"
     surface = "story" if body.get("surface") == "story" else "feed"
     jpg = await heavy(_server_preview, request["bid"], spec, surface, fmt, fields)
@@ -407,6 +545,8 @@ def _import_error(e):
 async def api_import(request):
     """Файл макета: PSD, AI, PDF или PNG. Поля: target=new|story, tid, file."""
     bid = request["bid"]
+    if not rate_ok(request, "import"):
+        return jerr(429, "rate")
     target, tid, data, filename = "new", None, None, ""
     reader = await request.multipart()
     while True:
@@ -425,7 +565,9 @@ async def api_import(request):
         return jerr(400, "file")
     try:
         result = await heavy(_import_file_job, bid, data, filename)
-        return web.json_response(_save_import(bid, result, target, tid, None))
+        out = _save_import(bid, result, target, tid, None)
+        db.log_event("tpl_create", request["uid"], bid, tid=out["template"]["id"], src="import:" + target)
+        return web.json_response(out)
     except I.ImportFail as e:
         return _import_error(e)
     except Exception as e:
@@ -449,9 +591,13 @@ async def _figma_get(session, url, token, **params):
 async def api_import_figma(request):
     """Фрейм Figma по ссылке. Токен используется для одного запроса и не сохраняется."""
     bid = request["bid"]
+    if not rate_ok(request, "import"):
+        return jerr(429, "rate")
     try:
         body = await request.json()
     except Exception:
+        return jerr(400, "json")
+    if not isinstance(body, dict):
         return jerr(400, "json")
     token = str(body.get("token") or "").strip()
     target = "story" if body.get("target") == "story" else "new"
@@ -479,7 +625,9 @@ async def api_import_figma(request):
                             if r.status == 200:
                                 images[nid] = await r.read()
         result = await heavy(_import_figma_job, bid, plan, images)
-        return web.json_response(_save_import(bid, result, target, tid, None))
+        out = _save_import(bid, result, target, tid, None)
+        db.log_event("tpl_create", request["uid"], bid, tid=out["template"]["id"], src="figma:" + target)
+        return web.json_response(out)
     except I.ImportFail as e:
         return _import_error(e)
     except asyncio.TimeoutError:
@@ -490,10 +638,18 @@ async def api_import_figma(request):
 
 
 # ============ Вход с компьютера ============
+def _client_ip(request):
+    return request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote or "?"
+
+
 async def auth_login(request):
+    if not rate_ok(request, "login", who="ip:" + _client_ip(request)):
+        return jerr(429, "rate")
     try:
         body = await request.json()
     except Exception:
+        return jerr(400, "json")
+    if not isinstance(body, dict):
         return jerr(400, "json")
     res = db.redeem_login_link(str(body.get("k") or ""))
     if not res:
@@ -508,9 +664,10 @@ async def auth_logout(request):
 
 
 def build_web(token: str) -> web.Application:
-    app = web.Application(middlewares=[auth_mw], client_max_size=IMPORT_MAX)
+    app = web.Application(middlewares=[headers_mw, auth_mw], client_max_size=IMPORT_MAX)
     app["token"] = token
     app.router.add_get("/", index)
+    app.router.add_get("/healthz", healthz)
     app.router.add_get("/fonts/{name}", font_file)
     app.router.add_post("/auth/login", auth_login)
     app.router.add_post("/auth/logout", auth_logout)
@@ -519,6 +676,7 @@ def build_web(token: str) -> web.Application:
     app.router.add_get("/api/asset/{kind}", api_asset)
     app.router.add_delete("/api/asset/{kind}", api_asset_delete)
     app.router.add_get("/api/font/{slot}", api_font)
+    app.router.add_get("/api/logo/colors", api_logo_colors)
     app.router.add_post("/api/upload/{kind}", api_upload)
     app.router.add_post("/api/templates", api_tpl_create)
     app.router.add_put("/api/templates/{tid:\\d+}", api_tpl_update)

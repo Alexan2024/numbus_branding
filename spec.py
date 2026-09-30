@@ -9,7 +9,9 @@ import secrets
 
 ANCHORS = {"tl", "tc", "tr", "ml", "mc", "mr", "bl", "bc", "br"}
 SOURCES = {"title", "subtitle", "hashtag", "counter", "static"}
+SLIDES = {"first", "rest"}
 MAX_LAYERS = 30
+MARGIN = 0.06          # поля бренда: один отступ от края для всех слоёв
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _PAL = re.compile(r"^p[0-4]$")
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
@@ -56,6 +58,8 @@ def _base(L):
     out = {"id": lid, "type": L.get("type")}
     if L.get("hidden"):
         out["hidden"] = True
+    if L.get("slides") in SLIDES:          # только на обложке карусели или только на остальных кадрах
+        out["slides"] = L["slides"]
     name = L.get("name")
     if isinstance(name, str) and name.strip():
         out["name"] = name.strip()[:40]
@@ -91,8 +95,17 @@ def sanitize_layer(L):
         out["case"] = L.get("case") if L.get("case") in ("none", "upper", "lower") else "none"
         out["align"] = L.get("align") if L.get("align") in ("left", "center", "right") else "left"
         out["maxw"] = _num(L.get("maxw"), 0, 1, 0)
+        d_lines = 5 if out["source"] in ("title", "subtitle") else 0
+        out["lines"] = int(_num(L.get("lines"), 0, 12, d_lines))
         out["color"] = _color(L.get("color"))
         out["opacity"] = _num(L.get("opacity"), 0, 1, 1)
+        sh = L.get("shadow")
+        if isinstance(sh, dict):      # мягкая тень без смещения
+            out["shadow"] = {
+                "blur": _num(sh.get("blur"), 0.02, 1.5, 0.35),
+                "opacity": _num(sh.get("opacity"), 0, 1, 0.5),
+                "color": _color(sh.get("color"), d={"mode": "fixed", "value": "p1"}),
+            }
         p = L.get("plate")
         if isinstance(p, dict):
             out["plate"] = {
@@ -157,103 +170,142 @@ def sanitize_spec(spec):
     }
 
 
+# Роли цветов палитры: p0 — светлый, p1 — тёмный, p2 — акцент, p3 и p4 — дополнительные
+PALETTE_DEFAULT = ["#FFFFFF", "#141414", "#EFEAE2", "#8A8A8A", "#FFFFFF"]
+PALETTE_ROLES = {"ru": ["Светлый", "Тёмный", "Акцент", "Доп. 1", "Доп. 2"],
+                 "en": ["Light", "Dark", "Accent", "Extra 1", "Extra 2"]}
+
+
 def sanitize_palette(v):
-    base = ["#FFFFFF", "#141414", "#D9D9D9", "#7A7A7A", "#FFFFFF"]
+    base = PALETTE_DEFAULT
     v = (v if isinstance(v, list) else [])[:5]
     v = v + base[len(v):]
     return [(c.upper() if isinstance(c, str) and _HEX.match(c) else base[i]) for i, c in enumerate(v)]
 
 
 # ============ Стартовые стили ============
-# Палитра по умолчанию: p0 — светлый, p1 — тёмный, p2 — акцент.
-# Стили намеренно разные по характеру: это отправная точка, а не готовый бренд.
+# Палитра: p0 — светлый, p1 — тёмный, p2 — акцент (по умолчанию — из логотипа).
+# Общая сетка: поля 6% ширины, логотип 14–15%, рубрика (хештег) 3,2%, заголовок 6,6–7,4% —
+# это не ниже читаемого на телефоне. Затемнение — только под текстом, по плавной кривой.
+# Сторис в стилях выключены, но уже сверстаны под безопасные зоны: сверху 14%, снизу 35%.
+# В карусели заголовок, рубрика и затемнение под ними — только на обложке (F = slides first),
+# на остальных кадрах — логотип: так делают редакции, и текст не повторяется на каждом фото.
 CONTRAST = {"mode": "contrast", "light": "p0", "dark": "p1"}
+LIGHT = {"mode": "fixed", "value": "p0"}
+DARK = {"mode": "fixed", "value": "p1"}
+M = MARGIN
+# Безопасные зоны сторис 1080×1920 в долях ширины: верх 14% высоты, низ 35% высоты
+STORY_TOP = round(0.14 * 1920 / 1080, 3)       # 0.249
+STORY_BOTTOM = round(0.35 * 1920 / 1080, 3)    # 0.622
 
 
 def _t(**kw):
-    base = dict(type="text", anchor="bl", x=0.05, y=0.05, source="static", text="", font="inter",
-                weight=500, size=0.03, tracking=0, leading=1.1, case="none", align="left", maxw=0,
-                color=dict(CONTRAST), opacity=1)
+    base = dict(type="text", anchor="bl", x=M, y=M, source="static", text="", font="onest",
+                weight=600, size=0.066, tracking=-0.01, leading=1.08, case="none", align="left", maxw=0.84,
+                lines=4, color=dict(LIGHT), opacity=1)
     base.update(kw)
     return base
 
 
+def _rubric(**kw):
+    base = dict(source="hashtag", font="onest", size=0.032, weight=600, case="upper", tracking=0.08,
+                maxw=0, lines=1, leading=1.0, color=dict(CONTRAST))
+    base.update(kw)
+    return _t(**base)
+
+
 def _logo(**kw):
-    base = dict(type="logo", anchor="bl", x=0.05, y=0.05, asset="logo", w=0.08, color=dict(CONTRAST), opacity=1)
+    base = dict(type="logo", anchor="tl", x=M, y=M, asset="logo", w=0.15, color=dict(CONTRAST), opacity=1)
+    base.update(kw)
+    return base
+
+
+def _counter(**kw):
+    base = dict(source="counter", text="{i} / {n}", font="jetbrains", weight=500, size=0.03, maxw=0, lines=1,
+                tracking=0, color=dict(CONTRAST), slides="rest")
+    base.update(kw)
+    return _t(**base)
+
+
+F = "first"
+
+
+def _grad(side="bottom", extent=0.6, opacity=0.85, **kw):
+    base = dict(type="gradient", side=side, extent=extent, color=dict(DARK), opacity=opacity, adaptive=False)
     base.update(kw)
     return base
 
 
 PRESETS = [
-    {"key": "mark", "name": {"ru": "Знак", "en": "Mark"}, "spec": {
-        "feed": {"layers": [_logo(anchor="tr", w=0.085)]},
-        "story": {"enabled": False, "layers": []}}},
-
-    {"key": "chip", "name": {"ru": "Метка", "en": "Chip"}, "spec": {
-        "feed": {"layers": [
-            _t(anchor="tl", source="hashtag", font="onest", weight=600, size=0.028,
-               color={"mode": "fixed", "value": "p1"},
-               plate={"color": {"mode": "fixed", "value": "p2"}, "opacity": 1, "radius": 0.5, "padx": 0.75, "pady": 0.55}),
-            _logo(anchor="br", w=0.075)]},
-        "story": {"enabled": False, "layers": []}}},
-
     {"key": "editorial", "name": {"ru": "Редакция", "en": "Editorial"}, "spec": {
         "feed": {"layers": [
-            {"type": "gradient", "side": "bottom", "extent": 0.55, "color": {"mode": "fixed", "value": "p1"},
-             "opacity": 0.8, "adaptive": True},
-            _t(anchor="tl", x=0.06, y=0.06, source="hashtag", font="inter", weight=600, size=0.02,
-               tracking=0.14, case="upper"),
-            _logo(anchor="tr", x=0.06, y=0.06, w=0.09),
-            _t(anchor="bl", x=0.06, y=0.075, source="title", font="playfair", weight=700, size=0.078,
-               leading=1.04, maxw=0.8, color={"mode": "fixed", "value": "p0"})]},
-        "story": {"enabled": True, "layers": [
-            {"type": "gradient", "side": "bottom", "extent": 0.5, "color": {"mode": "fixed", "value": "p1"},
-             "opacity": 0.85, "adaptive": True},
-            _t(anchor="tl", x=0.08, y=0.16, source="hashtag", font="inter", weight=600, size=0.028,
-               tracking=0.14, case="upper"),
-            _logo(anchor="tr", x=0.08, y=0.15, w=0.13),
-            _t(anchor="bl", x=0.08, y=0.3, source="title", font="playfair", weight=700, size=0.1,
-               leading=1.04, maxw=0.84, color={"mode": "fixed", "value": "p0"})]}}},
+            _grad("bottom", 0.62, 0.88, slides=F),
+            _logo(anchor="tl"),
+            _rubric(anchor="tr", align="right", slides=F),
+            _t(anchor="bl", source="title", size=0.068, leading=1.06, slides=F)]},
+        "story": {"enabled": False, "layers": [
+            _grad("bottom", 0.8, 0.9),
+            _logo(anchor="tl", x=0.08, y=STORY_TOP, w=0.2),
+            _rubric(anchor="tr", x=0.08, y=STORY_TOP + 0.01, size=0.04, align="right"),
+            _t(anchor="bl", x=0.08, y=STORY_BOTTOM + 0.02, source="title", size=0.09, leading=1.05)]}}},
 
-    {"key": "block", "name": {"ru": "Блок", "en": "Block"}, "spec": {
+    {"key": "caption", "name": {"ru": "Подпись", "en": "Caption"}, "spec": {
         "feed": {"layers": [
-            _logo(anchor="tl", w=0.09),
-            _t(anchor="bl", x=0, y=0.07, source="title", font="unbounded", weight=700, size=0.046,
-               leading=1.12, maxw=0.72, color={"mode": "fixed", "value": "p1"},
-               plate={"color": {"mode": "fixed", "value": "p2"}, "opacity": 1, "radius": 0, "padx": 1.1, "pady": 0.8})]},
-        "story": {"enabled": False, "layers": []}}},
+            _logo(anchor="tr", w=0.14),
+            _rubric(anchor="tl", slides=F),
+            _t(anchor="bl", x=0, y=M, source="title", font="golos", weight=700, size=0.05, leading=1.12,
+               tracking=0, maxw=0.8, color=dict(CONTRAST), slides=F,
+               plate={"color": {"mode": "fixed", "value": "p2"}, "opacity": 1, "radius": 0, "padx": 1.2, "pady": 0.7})]},
+        "story": {"enabled": False, "layers": [
+            _logo(anchor="tr", x=0.08, y=STORY_TOP, w=0.18),
+            _rubric(anchor="tl", x=0.08, y=STORY_TOP + 0.01, size=0.04),
+            _t(anchor="bl", x=0, y=STORY_BOTTOM + 0.02, source="title", font="golos", weight=700, size=0.066,
+               leading=1.12, tracking=0, maxw=0.82, color=dict(CONTRAST),
+               plate={"color": {"mode": "fixed", "value": "p2"}, "opacity": 1, "radius": 0, "padx": 1.2, "pady": 0.7})]}}},
 
     {"key": "frame", "name": {"ru": "Рамка", "en": "Frame"}, "spec": {
         "feed": {"layers": [
-            {"type": "rect", "fit": "inset", "m": 0.035, "stroke": 0.0025, "radius": 0,
-             "color": dict(CONTRAST), "opacity": 0.9},
-            _t(anchor="tc", x=0, y=0.07, source="hashtag", font="jost", weight=500, size=0.021,
-               tracking=0.18, case="upper", align="center"),
-            _logo(anchor="bc", x=0, y=0.07, w=0.11)]},
-        "story": {"enabled": False, "layers": []}}},
+            {"type": "rect", "fit": "inset", "m": 0.035, "stroke": 0.0028, "radius": 0,
+             "color": dict(CONTRAST), "opacity": 0.95},
+            _rubric(anchor="tl", x=M + 0.025, y=M + 0.025, slides=F),
+            _logo(anchor="br", x=M + 0.025, y=M + 0.025, w=0.14)]},
+        "story": {"enabled": False, "layers": [
+            {"type": "rect", "fit": "inset", "m": 0.05, "stroke": 0.003, "radius": 0,
+             "color": dict(CONTRAST), "opacity": 0.95},
+            _rubric(anchor="tl", x=0.09, y=STORY_TOP, size=0.04),
+            _logo(anchor="bl", x=0.09, y=STORY_BOTTOM, w=0.2)]}}},
 
     {"key": "carousel", "name": {"ru": "Карусель", "en": "Carousel"}, "spec": {
         "feed": {"layers": [
-            _t(anchor="tr", source="counter", text="{i} / {n}", font="jetbrains", weight=500, size=0.024),
-            _logo(anchor="bl", w=0.07)]},
+            _grad("top", 0.58, 0.85, slides=F),
+            _t(anchor="tl", source="title", size=0.074, leading=1.04, slides=F),
+            _counter(anchor="br"),
+            _logo(anchor="bl", w=0.14)]},
         "story": {"enabled": False, "layers": []}}},
 
     {"key": "center", "name": {"ru": "Центр", "en": "Center"}, "spec": {
         "feed": {"layers": [
-            {"type": "overlay", "color": {"mode": "fixed", "value": "p1"}, "opacity": 0.35},
+            {"type": "overlay", "color": dict(DARK), "opacity": 0.35, "slides": F},
             _t(anchor="mc", x=0, y=0, source="title", font="cormorant", weight=600, size=0.1,
-               leading=1.0, maxw=0.8, align="center", color={"mode": "fixed", "value": "p0"}),
-            _logo(anchor="bc", x=0, y=0.06, w=0.12, color={"mode": "fixed", "value": "p0"})]},
-        "story": {"enabled": True, "layers": [
-            {"type": "overlay", "color": {"mode": "fixed", "value": "p1"}, "opacity": 0.35},
-            _t(anchor="mc", x=0, y=0, source="title", font="cormorant", weight=600, size=0.13,
-               leading=1.0, maxw=0.82, align="center", color={"mode": "fixed", "value": "p0"}),
-            _logo(anchor="tc", x=0, y=0.16, w=0.18, color={"mode": "fixed", "value": "p0"})]}}},
+               leading=1.0, tracking=0, maxw=0.8, align="center", slides=F),
+            _logo(anchor="bc", x=0, y=M, w=0.14, color=dict(LIGHT))]},
+        "story": {"enabled": False, "layers": [
+            {"type": "overlay", "color": dict(DARK), "opacity": 0.35},
+            _t(anchor="mc", x=0, y=-0.1, source="title", font="cormorant", weight=600, size=0.13,
+               leading=1.0, tracking=0, maxw=0.82, align="center"),
+            _logo(anchor="tc", x=0, y=STORY_TOP, w=0.2, color=dict(LIGHT))]}}},
 
-    {"key": "blank", "name": {"ru": "С нуля", "en": "Blank"}, "spec": {
+    {"key": "mark", "name": {"ru": "Знак", "en": "Mark"}, "spec": {
+        "feed": {"layers": [_logo(anchor="tr", w=0.14)]},
+        "story": {"enabled": False, "layers": [_logo(anchor="tr", x=0.08, y=STORY_TOP, w=0.2)]}}},
+
+    {"key": "blank", "name": {"ru": "С нуля", "en": "Blank"}, "designer": True, "spec": {
         "feed": {"layers": []}, "story": {"enabled": False, "layers": []}}},
 ]
-SEED_PRESETS = ("mark", "editorial")
+# Три варианта, которые бот показывает на фото клиента при подключении
+ONBOARD_PRESETS = ("editorial", "caption", "frame")
+# Если клиент пропустил выбор — эти стили создаются сами
+SEED_PRESETS = ("editorial", "caption")
 
 
 def preset(key):
@@ -268,6 +320,11 @@ def preset_spec(key):
     return sanitize_spec(copy.deepcopy(p["spec"])) if p else sanitize_spec({})
 
 
+def preset_name(key, lang="ru"):
+    p = preset(key)
+    return (p["name"].get(lang) or p["name"]["ru"]) if p else key
+
+
 def presets_public(lang="ru"):
-    return [{"key": p["key"], "name": p["name"].get(lang) or p["name"]["ru"],
+    return [{"key": p["key"], "name": p["name"].get(lang) or p["name"]["ru"], "designer": bool(p.get("designer")),
              "spec": sanitize_spec(copy.deepcopy(p["spec"]))} for p in PRESETS]

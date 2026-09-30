@@ -1,8 +1,8 @@
-"""NUMBUS Branding — движок рендера v2 (слои).
+"""NUMBUS Branding — движок рендера v3 (слои).
 
 Шаблон клиента — это JSON со списком слоёв: логотип, текст, фигура, градиент,
-затемнение. Движок ничего не знает о конкретном стиле — стиль целиком задаёт
-клиент в редакторе (Mini App). Редактор рисует превью на <canvas> по тем же
+затемнение, графика. Движок ничего не знает о конкретном стиле — стиль целиком
+задаёт клиент в редакторе (Mini App). Редактор рисует превью на <canvas> по тем же
 правилам (webapp.html → renderSurface), поэтому превью совпадает с итогом.
 
 ЕДИНИЦЫ. Все координаты и размеры — доли ШИРИНЫ канваса (W). Так шаблон
@@ -14,25 +14,35 @@
 
 ТЕКСТ. Блок строк: высота = capH + (n−1)·leading·size. Верх блока — линия
 высоты прописных первой строки, низ — базовая линия последней. То есть
-«снизу» текст стоит на базовой линии, как в вёрстке.
+«снизу» текст стоит на базовой линии, как в вёрстке. Заголовок и подзаголовок
+проходят через типограф (typo.py). Если знака нет в шрифте, он рисуется
+шрифтом Inter того же начертания — как это делает браузер в редакторе.
+lines — сколько строк максимум: длинный текст сначала уменьшается (до 70%
+кегля), потом обрезается многоточием.
+
+СЛАЙДЫ. slides: all | first | rest — слой только на обложке карусели или
+только на остальных кадрах. Счётчик «1 / 1» на одиночном фото не рисуется.
 
 ЦВЕТ. {"mode":"fixed","value":"#RRGGBB"|"p0".."p4"} — фиксированный или из палитры;
 {"mode":"adaptive"} — тон фона ±45% (светлее на тёмном, темнее на светлом);
 {"mode":"contrast","light":..,"dark":..} — светлый на тёмном фоне, тёмный на светлом;
 {"mode":"original"} — только для логотипа: цвета файла.
+
+ФОТО переводится в sRGB (снимки iPhone — Display P3), JPEG сохраняется 4:4:4.
 """
 import io
 import os
+import re
 import hashlib
 import logging
+import tempfile
+from collections import OrderedDict
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
+from PIL import Image, ImageCms, ImageDraw, ImageFont, ImageOps, ImageFilter
 
-try:
-    import pillow_avif  # noqa: F401
-except Exception:
-    pass
+from typo import typograf
+
 try:
     import pillow_heif
     pillow_heif.register_heif_opener()
@@ -64,8 +74,16 @@ FONTS = {
 }
 CUSTOM_FONT_SLOTS = ("font1", "font2", "font3")
 DEFAULT_FONT = "inter"
-_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-_font_cache = {}
+FALLBACK_FONT = "inter"          # знаки, которых нет в шрифте, рисуются им (как в браузере)
+_DEJAVU = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+_DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT_CACHE_MAX = 256
+_font_cache = OrderedDict()      # (ключ, вес, кегль) → FreeTypeFont; старые вытесняются
+_cover_cache = {}                # ключ шрифта → множество кодов символов
+
+# Знаки, которые должны быть в шрифте бренда (проверка при загрузке своего шрифта)
+CHECK_CHARS = ("АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя"
+               "0123456789₽№«»„“—–…% ")
 
 
 def _apply_axes(font, weight, size):
@@ -90,34 +108,136 @@ def _apply_axes(font, weight, size):
         logger.warning("variation: %s", e)
 
 
+def _cache_put(ck, f):
+    _font_cache[ck] = f
+    _font_cache.move_to_end(ck)
+    while len(_font_cache) > FONT_CACHE_MAX:
+        _font_cache.popitem(last=False)
+    return f
+
+
+def qsize(size):
+    return max(1.0, round(float(size) * 2) / 2)
+
+
+def _custom_key(data):
+    return "c:" + hashlib.md5(data).hexdigest()
+
+
 def get_font(key, weight, size, customs=None):
-    """key — ключ каталога или слот своего шрифта (font1..font3)."""
-    size = max(1.0, round(float(size) * 2) / 2)
+    """key — ключ каталога, слот своего шрифта (font1..font3) или «dejavu»."""
+    size = qsize(size)
     weight = int(weight or 400)
     if key in CUSTOM_FONT_SLOTS and customs and customs.get(key):
         data = customs[key]
-        ck = ("c", hashlib.md5(data).hexdigest(), weight, size)
-        if ck not in _font_cache:
-            try:
-                f = ImageFont.truetype(io.BytesIO(data), size)
-                _apply_axes(f, weight, size)
-                _font_cache[ck] = f
-            except Exception as e:
-                logger.error("Свой шрифт не открылся: %s", e)
-                return get_font(DEFAULT_FONT, weight, size)
-        return _font_cache[ck]
+        ck = (_custom_key(data), weight, size)
+        f = _font_cache.get(ck)
+        if f is not None:
+            _font_cache.move_to_end(ck)
+            return f
+        try:
+            f = ImageFont.truetype(io.BytesIO(data), size)
+            _apply_axes(f, weight, size)
+        except Exception as e:
+            logger.error("Свой шрифт не открылся: %s", e)
+            return get_font(DEFAULT_FONT, weight, size)
+        return _cache_put(ck, f)
+    if key == "dejavu":
+        path = _DEJAVU_BOLD if weight >= 600 else _DEJAVU
+        ck = ("dejavu", weight >= 600, size)
+        f = _font_cache.get(ck)
+        if f is None:
+            f = _cache_put(ck, ImageFont.truetype(path, size) if os.path.exists(path) else ImageFont.load_default(size))
+        return f
     if key not in FONTS:
         key = DEFAULT_FONT
     ck = (key, weight, size)
-    if ck not in _font_cache:
-        try:
-            f = ImageFont.truetype(os.path.join(FONT_DIR, FONTS[key]["file"]), size)
-            _apply_axes(f, weight, size)
-        except Exception as e:
-            logger.error("Шрифт %s: %s — фолбэк", key, e)
-            f = ImageFont.truetype(_FALLBACK, size) if os.path.exists(_FALLBACK) else ImageFont.load_default()
-        _font_cache[ck] = f
-    return _font_cache[ck]
+    f = _font_cache.get(ck)
+    if f is not None:
+        _font_cache.move_to_end(ck)
+        return f
+    try:
+        f = ImageFont.truetype(os.path.join(FONT_DIR, FONTS[key]["file"]), size)
+        _apply_axes(f, weight, size)
+    except Exception as e:
+        logger.error("Шрифт %s: %s — фолбэк", key, e)
+        f = ImageFont.truetype(_DEJAVU, size) if os.path.exists(_DEJAVU) else ImageFont.load_default(size)
+    return _cache_put(ck, f)
+
+
+def _cmap_of(src):
+    try:
+        from fontTools.ttLib import TTFont
+        return frozenset(TTFont(src, lazy=True, fontNumber=0).getBestCmap() or {})
+    except Exception as e:
+        logger.warning("cmap: %s", e)
+        return None
+
+
+def font_cover(key, customs=None):
+    """Множество символов шрифта (None — неизвестно, считаем, что есть всё)."""
+    if key in CUSTOM_FONT_SLOTS and customs and customs.get(key):
+        ck = _custom_key(customs[key])
+        if ck not in _cover_cache:
+            _cover_cache[ck] = _cmap_of(io.BytesIO(customs[key]))
+        return _cover_cache[ck]
+    if key == "dejavu":
+        if "dejavu" not in _cover_cache:
+            _cover_cache["dejavu"] = _cmap_of(_DEJAVU) if os.path.exists(_DEJAVU) else None
+        return _cover_cache["dejavu"]
+    key = key if key in FONTS else DEFAULT_FONT
+    if key not in _cover_cache:
+        _cover_cache[key] = _cmap_of(os.path.join(FONT_DIR, FONTS[key]["file"]))
+    return _cover_cache[key]
+
+
+def missing_chars(data: bytes, chars=CHECK_CHARS) -> str:
+    """Каких знаков из списка нет в загруженном шрифте."""
+    cov = _cmap_of(io.BytesIO(data))
+    if cov is None:
+        return ""
+    return "".join(ch for ch in chars if ord(ch) not in cov)
+
+
+class Face:
+    """Шрифт слоя с запасными: основной → Inter того же веса → DejaVu.
+    Строка режется на куски по тому, какой шрифт знает знак."""
+
+    def __init__(self, key, weight, size, customs=None):
+        self.key = key if (key in FONTS or (key in CUSTOM_FONT_SLOTS and customs and customs.get(key))) else DEFAULT_FONT
+        self.weight, self.size, self.customs = weight, qsize(size), customs
+        self.font = get_font(self.key, weight, size, customs)
+        chain = [self.key] + ([FALLBACK_FONT] if self.key != FALLBACK_FONT else []) + ["dejavu"]
+        self.chain = [(k, font_cover(k, customs)) for k in chain]
+        self._fonts = {}
+
+    def _font(self, k):
+        if k not in self._fonts:
+            self._fonts[k] = self.font if k == self.key else get_font(k, self.weight, self.size, self.customs)
+        return self._fonts[k]
+
+    def _pick(self, ch):
+        cp = ord(ch)
+        for k, cov in self.chain:
+            if cov is None or cp in cov:
+                return k
+        return self.key
+
+    def runs(self, s):
+        out, cur, buf = [], None, []
+        for ch in s:
+            k = self._pick(ch)
+            if k != cur and buf:
+                out.append(("".join(buf), self._font(cur)))
+                buf = []
+            cur = k
+            buf.append(ch)
+        if buf:
+            out.append(("".join(buf), self._font(cur)))
+        return out
+
+    def length(self, s):
+        return sum(f.getlength(t) for t, f in self.runs(s)) if s else 0.0
 
 
 def validate_font(data: bytes) -> bool:
@@ -137,20 +257,137 @@ def font_name(data: bytes, fallback: str) -> str:
         return fallback
 
 
+# ============ Цветовой профиль ============
+_SRGB = ImageCms.createProfile("sRGB")
+SRGB_ICC = ImageCms.ImageCmsProfile(_SRGB).tobytes()
+
+
+def to_srgb(img):
+    """Картинка с профилем (Display P3, Adobe RGB, CMYK) → sRGB. Без профиля — как есть."""
+    icc = img.info.get("icc_profile")
+    if not icc:
+        return img
+    try:
+        src = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+        desc = (ImageCms.getProfileDescription(src) or "").lower()
+        if "srgb" in desc and img.mode in ("RGB", "RGBA"):
+            return img
+        if img.mode not in ("RGB", "RGBA", "CMYK", "L"):
+            img = img.convert("RGBA" if "A" in img.mode or "transparency" in img.info else "RGB")
+        out_mode = "RGBA" if img.mode == "RGBA" else "RGB"
+        out = ImageCms.profileToProfile(img, src, _SRGB, renderingIntent=ImageCms.Intent.PERCEPTUAL,
+                                        outputMode=out_mode)
+        if out is None:
+            return img
+        out.info.pop("icc_profile", None)
+        return out
+    except Exception as e:
+        logger.info("ICC: %s", e)
+        return img
+
+
 # ============ Картинки ============
-def open_image(data: bytes) -> Image.Image:
-    return ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
+# 200-Мп снимки с телефонов открываются: JPEG декодируется сразу уменьшенным (draft),
+# а остальные форматы больше MAX_PIXELS не принимаются — иначе не хватит памяти.
+Image.MAX_IMAGE_PIXELS = 260_000_000
+MAX_PIXELS = 100_000_000
+PHOTO_SHORT = 2560     # короткой стороны фото с запасом хватает на любой формат вывода
+
+
+class TooBig(ValueError):
+    """Картинка больше MAX_PIXELS: не открываем, чтобы не съесть память сервера."""
+
+
+def open_image(data: bytes, short: int = None) -> Image.Image:
+    img = Image.open(io.BytesIO(data))
+    W, H = img.size
+    # MPO — тот же JPEG (так сохраняют Samsung и iPhone с HDR), draft работает и для него
+    if short and img.format in ("JPEG", "MPO"):
+        s = next((a for a in (8, 4, 2) if min(W, H) // a >= short), 1)
+        if s > 1:
+            img.draft(img.mode, (W // s, H // s))
+    if img.size[0] * img.size[1] > MAX_PIXELS:
+        raise TooBig(f"image too big: {W}x{H}")
+    img = ImageOps.exif_transpose(img)
+    return to_srgb(img)
 
 
 def open_photo(data: bytes) -> Image.Image:
-    return open_image(data).convert("RGB")
+    return open_image(data, PHOTO_SHORT).convert("RGB")
+
+
+_SVG_IMG = re.compile(rb"<image\b[^>]*>", re.I)
+_SVG_DANGER = re.compile(rb"<!DOCTYPE[^>]*(\[[\s\S]*?\])?\s*>|<script\b[\s\S]*?</script>", re.I)
+
+
+_RASTER_SIGS = (b"\x89PNG", b"\xff\xd8", b"GIF8", b"RIFF", b"BM", b"II*\x00", b"MM\x00*")
+
+
+def is_svg(data: bytes) -> bool:
+    if data.startswith(_RASTER_SIGS):
+        return False
+    head = data[:4096].lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    return head.startswith((b"<?xml", b"<svg", b"<!--", b"<!doctype")) and b"<svg" in data[:65536].lower()
+
+
+def is_pdf(data: bytes) -> bool:
+    """PDF и AI (Illustrator сохраняет PDF-совместимый файл)."""
+    return not data.startswith(_RASTER_SIGS) and b"%PDF-" in data[:1024]
+
+
+def _svg_size(data):
+    txt = data[:65536].decode("utf-8", "ignore")
+    m = re.search(r"<svg\b[^>]*>", txt, re.I | re.S)
+    tag = m.group(0) if m else ""
+    vb = re.search(r"viewBox\s*=\s*[\"']\s*([-\d.eE]+)[\s,]+([-\d.eE]+)[\s,]+([\d.eE]+)[\s,]+([\d.eE]+)", tag)
+    if vb:
+        return float(vb.group(3)), float(vb.group(4))
+    w = re.search(r"\bwidth\s*=\s*[\"']\s*([\d.]+)", tag)
+    h = re.search(r"\bheight\s*=\s*[\"']\s*([\d.]+)", tag)
+    if w and h:
+        return float(w.group(1)), float(h.group(1))
+    return None
+
+
+def rasterize_vector(data: bytes, max_side=2000) -> Image.Image:
+    """Логотип в SVG или PDF (первая страница) → RGBA на прозрачном фоне."""
+    if is_svg(data):
+        import resvg_py
+        # Внешние картинки и скрипты не нужны логотипу и небезопасны на сервере
+        clean = _SVG_DANGER.sub(b"", data)
+        clean = _SVG_IMG.sub(lambda m: m.group(0) if b"data:" in m.group(0).lower() else b"", clean)
+        size = _svg_size(clean)
+        kw = {}
+        if size and size[0] > 0 and size[1] > 0:
+            if size[0] >= size[1]:
+                kw["width"] = max_side
+            else:
+                kw["height"] = max_side
+        else:
+            kw["width"] = max_side
+        with tempfile.TemporaryDirectory() as empty:
+            png = resvg_py.svg_to_bytes(svg_string=clean.decode("utf-8", "replace"), resources_dir=empty, **kw)
+        return Image.open(io.BytesIO(bytes(png))).convert("RGBA")
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(data)
+    try:
+        page = pdf[0]
+        w, h = page.get_size()
+        scale = max_side / max(w, h, 1)
+        bmp = page.render(scale=scale, fill_color=(0, 0, 0, 0), may_draw_forms=True, rev_byteorder=True)
+        return bmp.to_pil().convert("RGBA")
+    finally:
+        pdf.close()
 
 
 def prepare_logo(data: bytes):
-    """RGBA-логотип, обрезанный по видимой части. Если прозрачности нет —
-    фон определяется по углам, альфа строится из контраста с ним.
-    Возвращает (png_bytes, had_alpha)."""
-    img = open_image(data).convert("RGBA")
+    """RGBA-логотип, обрезанный по видимой части. SVG и PDF растрируются.
+    Если прозрачности нет — фон определяется по углам, альфа строится из
+    контраста с ним. Возвращает (png_bytes, had_alpha)."""
+    if is_svg(data) or is_pdf(data):
+        img = rasterize_vector(data)
+    else:
+        img = open_image(data).convert("RGBA")
     if max(img.size) > 3000:
         img.thumbnail((3000, 3000), Image.LANCZOS)
     arr = np.array(img)
@@ -178,6 +415,29 @@ def prepare_logo(data: bytes):
     return buf.getvalue(), had_alpha
 
 
+def logo_colors(png: bytes, k=3):
+    """Фирменные цвета из логотипа: до k заметных цветов, без белого, чёрного и серого."""
+    img = Image.open(io.BytesIO(png)).convert("RGBA")
+    img.thumbnail((240, 240), Image.LANCZOS)
+    arr = np.asarray(img).reshape(-1, 4)
+    px = arr[arr[:, 3] > 170][:, :3]
+    if len(px) < 30:
+        return []
+    q = Image.fromarray(px.reshape(1, -1, 3).astype(np.uint8), "RGB").quantize(colors=8, method=Image.Quantize.MEDIANCUT)
+    pal = q.getpalette()[:8 * 3]
+    found = []
+    for cnt, idx in sorted(q.getcolors() or [], reverse=True):
+        rgb = tuple(pal[idx * 3: idx * 3 + 3])
+        if cnt < len(px) * 0.04:
+            continue
+        if max(rgb) - min(rgb) < 30:          # белый, чёрный, серый — не фирменный цвет
+            continue
+        if any(sum((a - b) ** 2 for a, b in zip(rgb, c)) < 45 ** 2 for c in found):
+            continue
+        found.append(rgb)
+    return ["#%02X%02X%02X" % c for c in found[:k]]
+
+
 def sample_image(w=1600, h=2000) -> Image.Image:
     """Нейтральный фон для превью: светлый верх, тёмный низ."""
     y = np.linspace(0, 1, h).reshape(-1, 1)
@@ -195,14 +455,27 @@ def sample_image(w=1600, h=2000) -> Image.Image:
                            sun.filter(ImageFilter.GaussianBlur(w * 0.03)))
 
 
-def fit_cover(img, cw, ch):
-    ir, cr = img.width / img.height, cw / ch
+def cover_box(iw, ih, cw, ch, focus=None):
+    """Как фото ляжет в кадр: (dw, dh, x0, y0). focus — (fx, fy) от 0 до 1:
+    какая часть фото остаётся в кадре при обрезке (0.5 — середина)."""
+    fx, fy = focus or (0.5, 0.5)
+    ir, cr = iw / ih, cw / ch
     if ir > cr:
         dh, dw = ch, int(round(ch * ir))
     else:
         dw, dh = cw, int(round(cw / ir))
-    x0, y0 = (dw - cw) // 2, (dh - ch) // 2
+    return dw, dh, int((dw - cw) * fx), int((dh - ch) * fy)
+
+
+def fit_cover(img, cw, ch, focus=None):
+    dw, dh, x0, y0 = cover_box(img.width, img.height, cw, ch, focus)
     return img.resize((dw, dh), Image.LANCZOS).crop((x0, y0, x0 + cw, y0 + ch))
+
+
+def crop_share(iw, ih, cw, ch):
+    """Какая доля фото уходит при обрезке под формат (0 — ничего)."""
+    dw, dh, _, _ = cover_box(iw, ih, cw, ch)
+    return 1 - (cw * ch) / (dw * dh)
 
 
 # ============ Цвет ============
@@ -239,13 +512,15 @@ def shift_tone(r, g, b, pct):
 class Ctx:
     """Всё, что нужно слоям: палитра, логотипы, свои шрифты, значения полей."""
 
-    def __init__(self, palette=None, logos=None, customs=None, fields=None, dark=0.0, images=None):
+    def __init__(self, palette=None, logos=None, customs=None, fields=None, dark=0.0, images=None, focus=None):
         self.palette = palette or []
         self.logos = logos or {}          # {"logo": RGBA Image, "logo_alt": ...}
         self.customs = customs or {}      # {"font1": bytes, ...}
         self.fields = fields or {}        # title, subtitle, hashtag, i, n
         self.dark = float(dark)
         self.images = images              # callable(asset_id) -> RGBA Image | None (графика из макетов)
+        self.focus = focus                # (fx, fy) — точка фокуса фото
+        self.notes = set()                # что пришлось сделать с текстом: title_cut, title_small
 
     def image(self, asset):
         if not self.images:
@@ -302,6 +577,11 @@ def _rounded_layer(size, box, radius, fill, stroke=0):
 
 
 # ============ Текст ============
+TEXT_LINES_DEFAULT = 5            # заголовок и подзаголовок без настройки — не больше 5 строк
+SHRINK_STEPS = 6                  # длинный текст уменьшается шагами по 5% до 70% кегля
+ELLIPSIS = "…"
+
+
 def apply_case(s, case):
     return s.upper() if case == "upper" else (s.lower() if case == "lower" else s)
 
@@ -310,30 +590,37 @@ def text_content(L, ctx):
     src = L.get("source", "static")
     f = ctx.fields
     if src == "title":
-        s = f.get("title") or ""
+        s = typograf(f.get("title") or "")
     elif src == "subtitle":
-        s = f.get("subtitle") or ""
+        s = typograf(f.get("subtitle") or "")
     elif src == "hashtag":
         s = f.get("hashtag") or ""
     elif src == "counter":
-        n = f.get("n") or 0
-        s = (L.get("text") or "{i} / {n}").replace("{i}", str(f.get("i", 1))).replace("{n}", str(n)) if n else ""
+        n = int(f.get("n") or 0)
+        s = (L.get("text") or "{i} / {n}").replace("{i}", str(f.get("i", 1))).replace("{n}", str(n)) if n > 1 else ""
     else:
         s = L.get("text") or ""
     return apply_case(s, L.get("case", "none"))
 
 
-def tracked_w(font, s, ls):
-    return font.getlength(s) + ls * (len(s) - 1) if s else 0.0
+def max_lines(L):
+    v = L.get("lines")
+    if v is None:
+        return TEXT_LINES_DEFAULT if L.get("source") in ("title", "subtitle") else 0
+    return int(v)
 
 
-def wrap(text, font, ls, maxw):
+def tracked_w(face, s, ls):
+    return face.length(s) + ls * (len(s) - 1) if s else 0.0
+
+
+def wrap(text, face, ls, maxw):
     out = []
     for para in text.split("\n"):
         line = ""
         for w in para.split(" "):
             cand = w if line == "" else line + " " + w
-            if line != "" and maxw > 0 and tracked_w(font, cand, ls) > maxw:
+            if line != "" and maxw > 0 and tracked_w(face, cand, ls) > maxw:
                 out.append(line)
                 line = w
             else:
@@ -342,24 +629,63 @@ def wrap(text, font, ls, maxw):
     return out
 
 
+def _truncate(lines, n, face, ls, maxw):
+    keep = lines[:n]
+    last = keep[-1]
+    while maxw > 0 and " " in last and tracked_w(face, last + ELLIPSIS, ls) > maxw:
+        last = last.rsplit(" ", 1)[0]
+    keep[-1] = last.rstrip(" ,;:—–-") + ELLIPSIS
+    return keep
+
+
 def layout_text(L, ctx, content, W):
     """Строки, шрифт и габариты блока. Общая логика с webapp.html → layoutText."""
-    size = float(L.get("size", 0.04)) * W
+    size0 = float(L.get("size", 0.04)) * W
     key, weight = L.get("font", DEFAULT_FONT), L.get("weight", 400)
-    font = get_font(key, weight, size, ctx.customs)
-    ls = float(L.get("tracking", 0)) * size
+    tr = float(L.get("tracking", 0))
     maxw = float(L.get("maxw", 0)) * W
-    lines = wrap(content, font, ls, maxw)
-    widest = max((tracked_w(font, ln, ls) for ln in lines), default=0)
+    nmax = max_lines(L)
+    size = size0
+    face = Face(key, weight, size, ctx.customs)
+    ls = tr * size
+    lines = wrap(content, face, ls, maxw)
+    small = cut = False
+    if nmax > 0 and len(lines) > nmax:
+        if maxw > 0:
+            for k in range(1, SHRINK_STEPS + 1):
+                size = size0 * (1 - 0.05 * k)
+                face = Face(key, weight, size, ctx.customs)
+                ls = tr * size
+                lines = wrap(content, face, ls, maxw)
+                if len(lines) <= nmax:
+                    break
+            small = True
+        if len(lines) > nmax:
+            lines = _truncate(lines, nmax, face, ls, maxw)
+            cut = True
+    widest = max((tracked_w(face, ln, ls) for ln in lines), default=0)
     if maxw > 0 and widest > maxw:  # одно слово шире рамки — уменьшаем кегль
         size = size * maxw / widest
-        font = get_font(key, weight, size, ctx.customs)
-        ls = float(L.get("tracking", 0)) * size
-        widest = max((tracked_w(font, ln, ls) for ln in lines), default=0)
+        face = Face(key, weight, size, ctx.customs)
+        ls = tr * size
+        widest = max((tracked_w(face, ln, ls) for ln in lines), default=0)
+    font = face.font
     cap = -font.getbbox("H", anchor="ls")[1]
     adv = float(L.get("leading", 1.1)) * size
-    return dict(lines=lines, font=font, ls=ls, size=size, cap=cap, adv=adv,
-                w=widest, h=cap + (len(lines) - 1) * adv)
+    return dict(lines=lines, face=face, font=font, ls=ls, size=size, cap=cap, adv=adv,
+                w=widest, h=cap + (len(lines) - 1) * adv, small=small, cut=cut)
+
+
+def _draw_line(d, face, ln, bx, by, ls, fill):
+    x = bx
+    for text, font in face.runs(ln):
+        if ls == 0:
+            d.text((x, by), text, font=font, fill=fill, anchor="ls")
+            x += font.getlength(text)
+        else:
+            for ch in text:
+                d.text((x, by), ch, font=font, fill=fill, anchor="ls")
+                x += font.getlength(ch) + ls
 
 
 def draw_text_layer(canvas, L, ctx):
@@ -368,6 +694,11 @@ def draw_text_layer(canvas, L, ctx):
     if not content.strip():
         return None
     m = layout_text(L, ctx, content, W)
+    if L.get("source") in ("title", "subtitle"):
+        if m["cut"]:
+            ctx.notes.add(L["source"] + "_cut")
+        elif m["small"]:
+            ctx.notes.add(L["source"] + "_small")
     plate = L.get("plate")
     padx = float(plate.get("padx", 0.8)) * m["size"] if plate else 0
     pady = float(plate.get("pady", 0.5)) * m["size"] if plate else 0
@@ -384,23 +715,26 @@ def draw_text_layer(canvas, L, ctx):
     tx, ty = left + padx, top + pady
     col = resolve_color(L.get("color"), ctx, canvas, (tx, ty, m["w"], m["h"])) or (255, 255, 255)
     fill = col + (int(round(255 * opacity)),)
-    # Отдельный слой → корректное наложение полупрозрачного текста
-    pad = int(m["size"])
+    shadow = L.get("shadow")
+    blur = float(shadow.get("blur", 0.3)) * m["size"] if shadow else 0.0
+    # Отдельный слой → корректное наложение полупрозрачного текста и тени
+    pad = int(m["size"] + 2 * blur)
     lx0, ly0 = int(tx) - pad, int(ty) - pad
     lay = Image.new("RGBA", (int(m["w"]) + 2 * pad + 2, int(m["h"]) + 2 * pad + 2), (0, 0, 0, 0))
     d = ImageDraw.Draw(lay)
     align = L.get("align", "left")
-    font, ls = m["font"], m["ls"]
+    face, ls = m["face"], m["ls"]
     for i, ln in enumerate(m["lines"]):
-        lw = tracked_w(font, ln, ls)
+        lw = tracked_w(face, ln, ls)
         off = 0 if align == "left" else ((m["w"] - lw) / 2 if align == "center" else m["w"] - lw)
-        bx = tx + off - lx0
-        by = ty + m["cap"] + i * m["adv"] - ly0
-        if ls == 0:
-            d.text((bx, by), ln, font=font, fill=fill, anchor="ls")
-        else:
-            for k, ch in enumerate(ln):
-                d.text((bx + font.getlength(ln[:k]) + ls * k, by), ch, font=font, fill=fill, anchor="ls")
+        _draw_line(d, face, ln, tx + off - lx0, ty + m["cap"] + i * m["adv"] - ly0, ls, fill)
+    if shadow and blur > 0:
+        sc = resolve_color(shadow.get("color"), ctx, canvas, (tx, ty, m["w"], m["h"])) or (0, 0, 0)
+        sa = float(shadow.get("opacity", 0.5))
+        mask = lay.split()[3].filter(ImageFilter.GaussianBlur(blur / 2))
+        sh = Image.new("RGBA", lay.size, sc + (0,))
+        sh.putalpha(mask.point(lambda p: int(round(p * sa))))
+        over(canvas, sh, lx0, ly0)
     over(canvas, lay, lx0, ly0)
     return (left, top, bw, bh)
 
@@ -466,6 +800,18 @@ def draw_rect_layer(canvas, L, ctx):
     return (left, top, w, h)
 
 
+# Плавная кривая затемнения (easing gradient): у края кадра — полная плотность,
+# к границе зоны — ноль без видимой ступеньки. Те же точки — в webapp.html → drawGradient.
+EASE_POS = (0, 0.19, 0.34, 0.47, 0.565, 0.65, 0.73, 0.802, 0.861, 0.91, 0.952, 0.982, 1)
+EASE_VAL = (1, 0.738, 0.541, 0.382, 0.278, 0.194, 0.126, 0.075, 0.042, 0.021, 0.008, 0.002, 0)
+
+
+def gradient_ramp(ext, alpha):
+    """Плотность 0..255 от края кадра (индекс 0) внутрь зоны, с лёгким шумом против полос."""
+    p = (np.arange(ext, dtype=np.float64) + 0.5) / ext
+    return np.interp(p, EASE_POS, EASE_VAL) * 255.0 * alpha
+
+
 def draw_gradient_layer(canvas, L, ctx):
     W, H = canvas.size
     side = L.get("side", "bottom")
@@ -478,22 +824,22 @@ def draw_gradient_layer(canvas, L, ctx):
     if L.get("adaptive"):
         alpha *= 0.4 + 0.6 * luma(*avg_color(canvas, zone)) / 255
     alpha = max(0.0, min(0.99, alpha + ctx.dark))
-    ramp = np.linspace(0, 255 * alpha, ext, dtype=np.float32)
-    if side in ("top", "left"):
-        ramp = ramp[::-1]
-    mask = np.zeros((H, W), dtype=np.float32)
-    if side == "bottom":
-        mask[H - ext:, :] = ramp[:, None]
-    elif side == "top":
-        mask[:ext, :] = ramp[:, None]
-    elif side == "left":
-        mask[:, :ext] = ramp[None, :]
+    ramp = gradient_ramp(ext, alpha)                 # ramp[0] — у края кадра
+    if vertical:
+        band = np.repeat(ramp[:, None], W, axis=1)
+        if side == "bottom":
+            band = band[::-1]
     else:
-        mask[:, W - ext:] = ramp[None, :]
+        band = np.repeat(ramp[None, :], H, axis=0)
+        if side == "right":
+            band = band[:, ::-1]
+    noise = np.random.default_rng(1).random(band.shape) - 0.5     # дизеринг: без полос на гладком небе
+    band = np.clip(np.round(band + noise * (band > 0.5)), 0, 255).astype(np.uint8)
     col = resolve_color(L.get("color"), ctx, canvas, zone) or (0, 0, 0)
-    solid = Image.new("RGBA", (W, H), col + (0,))
-    solid.putalpha(Image.fromarray(np.round(mask).astype(np.uint8), "L"))
-    canvas.alpha_composite(solid)
+    x0, y0, zw, zh = zone
+    piece = Image.new("RGBA", (zw, zh), col + (0,))
+    piece.putalpha(Image.fromarray(band, "L"))
+    canvas.alpha_composite(piece, (x0, y0))
     return zone
 
 
@@ -544,10 +890,17 @@ DRAW = {"text": draw_text_layer, "logo": draw_logo_layer, "rect": draw_rect_laye
         "gradient": draw_gradient_layer, "overlay": draw_overlay_layer, "image": draw_image_layer}
 
 
+def on_slide(L, i):
+    """Показывать ли слой на кадре i карусели (1 — обложка)."""
+    s = L.get("slides", "all")
+    return i <= 1 if s == "first" else (i > 1 if s == "rest" else True)
+
+
 def render_surface(photo, W, H, layers, ctx) -> Image.Image:
-    canvas = fit_cover(photo, W, H).convert("RGBA")
+    canvas = fit_cover(photo, W, H, ctx.focus).convert("RGBA")
+    i = int(ctx.fields.get("i") or 1)
     for L in layers or []:
-        if L.get("hidden"):
+        if L.get("hidden") or not on_slide(L, i):
             continue
         fn = DRAW.get(L.get("type"))
         if fn:
@@ -607,12 +960,16 @@ def render_template(photo, spec, fmt, ctx):
 
 # ============ Вывод ============
 def to_jpeg(img, quality=92) -> bytes:
+    """JPEG без цветовой субдискретизации (4:4:4): края цветных букв и плашек остаются чистыми."""
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    img.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True, subsampling=0,
+                            icc_profile=SRGB_ICC)
     return buf.getvalue()
 
 
 def to_preview(img, max_side=1200) -> bytes:
     im = img.copy()
     im.thumbnail((max_side, max_side), Image.LANCZOS)
-    return to_jpeg(im, 85)
+    buf = io.BytesIO()
+    im.convert("RGB").save(buf, format="JPEG", quality=85, optimize=True)
+    return buf.getvalue()

@@ -1,10 +1,15 @@
 """NUMBUS Branding — хранилище (SQLite).
 
-Один файл numbus.db на Railway Volume. Соединение открывается на каждый
-вызов — так безопасно при рендере в потоках и достаточно быстро для бота.
+Один файл numbus.db в постоянной папке (Volume на Railway, диск сервера в РФ).
+Соединение открывается на каждый вызов — так безопасно при рендере в потоках
+и достаточно быстро для бота. Режим WAL: бот и редактор пишут одновременно,
+а чтения не ждут записей.
 """
 import os
 import json
+import gzip
+import shutil
+import hashlib
 import secrets
 import sqlite3
 import logging
@@ -15,10 +20,13 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _resolve_data_dir():
-    """Railway сам выставляет RAILWAY_VOLUME_MOUNT_PATH при подключённом
-    Volume. Иначе /data, иначе папка рядом с ботом (эфемерно)."""
+    """DATA_DIR из окружения, иначе Railway Volume (RAILWAY_VOLUME_MOUNT_PATH),
+    иначе /data, иначе папка рядом с ботом (эфемерно). /data считается постоянной,
+    только если это подключённый диск: папка внутри контейнера пропадёт при деплое."""
+    explicit = os.environ.get("DATA_DIR")
     vol = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
-    candidates = ([(vol, True)] if vol else []) + [("/data", True), (os.path.join(BASE, "data"), False)]
+    candidates = ([(explicit, True)] if explicit else []) + ([(vol, True)] if vol else []) + \
+        [("/data", os.path.ismount("/data")), (os.path.join(BASE, "data"), False)]
     for d, persistent in candidates:
         try:
             os.makedirs(d, exist_ok=True)
@@ -31,9 +39,11 @@ def _resolve_data_dir():
 
 DATA_DIR, STORAGE_PERSISTENT = _resolve_data_dir()
 DB_PATH = os.environ.get("NUMBUS_DB") or os.path.join(DATA_DIR, "numbus.db")
+BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "backups")
+BACKUP_KEEP = 7
 
 # ============ Тарифы ============
-# photos — лимит обработанных фото в календарный месяц (UTC)
+# photos — лимит обработанных фото за период подписки (30 дней от активации)
 # members — сколько человек в команде бренда (включая владельца)
 # brands — сколько брендов в одной подписке. Лимиты фото и людей — на всю подписку.
 PLANS = {
@@ -42,11 +52,16 @@ PLANS = {
     "media":  {"photos": 1000, "members": 5,  "brands": 1},
     "studio": {"photos": 5000, "members": 20, "brands": 10},
 }
+PERIOD_DAYS = 30
+# Роли в бренде: владелец — всё; дизайнер — редактор стиля и шаблоны, без тарифа и команды;
+# участник — только посты
+ROLES = ("owner", "designer", "editor")
+EDITOR_ROLES = ("owner", "designer")
 
 DEFAULT_KIT = {
     "name": "",
     # p0 — светлый, p1 — тёмный, p2 — акцент, p3–p4 — дополнительные
-    "palette": ["#FFFFFF", "#141414", "#D9D9D9", "#7A7A7A", "#FFFFFF"],
+    "palette": ["#FFFFFF", "#141414", "#EFEAE2", "#8A8A8A", "#FFFFFF"],
     "hashtags": [],
     "custom_fonts": {},    # {"font1": "Название шрифта"}
 }
@@ -114,7 +129,7 @@ CREATE TABLE IF NOT EXISTS msglog (
     PRIMARY KEY (chat_id, msg_id)
 );
 CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
+    token TEXT PRIMARY KEY,          -- sha256 от токена: сам токен в базе не хранится
     kind TEXT NOT NULL,              -- link (одноразовая, 15 мин) | session (7 дней)
     tg_id INTEGER NOT NULL,
     brand_id INTEGER NOT NULL,
@@ -126,6 +141,26 @@ CREATE TABLE IF NOT EXISTS prefs (
     data TEXT NOT NULL,
     PRIMARY KEY (tg_id, brand_id)
 );
+CREATE TABLE IF NOT EXISTS analytics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    tg_id INTEGER,
+    brand_id INTEGER,
+    kind TEXT NOT NULL,
+    data TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_analytics_kind_ts ON analytics (kind, ts);
+CREATE INDEX IF NOT EXISTS idx_analytics_brand ON analytics (brand_id, ts);
+CREATE TABLE IF NOT EXISTS access_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id INTEGER NOT NULL,
+    name TEXT,
+    username TEXT,
+    channel TEXT,
+    status TEXT NOT NULL DEFAULT 'new',   -- new | approved | declined
+    created_at TEXT NOT NULL,
+    handled_at TEXT
+);
 """
 
 
@@ -134,8 +169,9 @@ def _now():
 
 
 def _conn():
-    c = sqlite3.connect(DB_PATH, timeout=10)
+    c = sqlite3.connect(DB_PATH, timeout=15)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys=OFF")
     return c
 
 
@@ -145,17 +181,32 @@ MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN username TEXT",
     "ALTER TABLE users ADD COLUMN last_seen TEXT",
     "ALTER TABLE members ADD COLUMN joined_at TEXT",
+    "ALTER TABLE brands ADD COLUMN period_anchor TEXT",    # начало подписки: от него считаются 30-дневные периоды
 ]
+
+
+def _hash_token(tok: str) -> str:
+    return hashlib.sha256((tok or "").encode()).hexdigest()
 
 
 def init_db():
     with _conn() as c:
+        try:
+            c.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass
         c.executescript(SCHEMA)
         for sql in MIGRATIONS:
             try:
                 c.execute(sql)
             except sqlite3.OperationalError:
                 pass   # колонка уже есть
+        c.execute("UPDATE brands SET period_anchor=created_at WHERE period_anchor IS NULL")
+        # Сессии раньше хранились открытым текстом — заменяем на хэш (вход сохраняется)
+        for r in c.execute("SELECT token FROM sessions").fetchall():
+            tok = r["token"]
+            if not (len(tok) == 64 and all(ch in "0123456789abcdef" for ch in tok)):
+                c.execute("UPDATE OR REPLACE sessions SET token=? WHERE token=?", (_hash_token(tok), tok))
     logger.info("БД: %s (%s)", DB_PATH, "постоянная" if STORAGE_PERSISTENT else "ВРЕМЕННАЯ")
 
 
@@ -203,9 +254,9 @@ def _brand_row(row) -> dict:
     b["locked"] = False
     if root and root != b["id"]:
         with _conn() as c:
-            r = c.execute("SELECT plan, plan_until FROM brands WHERE id=?", (root,)).fetchone()
+            r = c.execute("SELECT plan, plan_until, period_anchor FROM brands WHERE id=?", (root,)).fetchone()
         if r:
-            b["plan"], b["plan_until"] = r["plan"], r["plan_until"]
+            b["plan"], b["plan_until"], b["period_anchor"] = r["plan"], r["plan_until"], r["period_anchor"]
             b["locked"] = PLANS.get(r["plan"], PLANS["pilot"])["brands"] <= 1
     return b
 
@@ -227,20 +278,23 @@ def sub_brands(brand_id: int) -> list:
     return [get_brand(i) for i in sub_brand_ids(brand_id)]
 
 
-def create_brand(owner_id: int, plan: str, days: int, sub_id: int = None) -> int:
-    """sub_id — добавить бренд в существующую подписку (тариф и срок берутся у неё)."""
-    until = (_now() + timedelta(days=days)).isoformat()
+def create_brand(owner_id: int, plan: str, days: int, sub_id: int = None, lang: str = None, seed: bool = False) -> int:
+    """sub_id — добавить бренд в существующую подписку (тариф и срок берутся у неё).
+    Стартовые стили создаются, когда клиент выберет свой на фото (или seed=True)."""
+    now = _now()
+    until = (now + timedelta(days=days)).isoformat()
     with _conn() as c:
         cur = c.execute(
-            "INSERT INTO brands (owner_id, kit, plan, plan_until, join_token, created_at, sub_id) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO brands (owner_id, kit, plan, plan_until, join_token, created_at, sub_id, period_anchor) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (owner_id, json.dumps(DEFAULT_KIT, ensure_ascii=False), plan, until,
-             secrets.token_urlsafe(9), _now().isoformat(), sub_id))
+             secrets.token_urlsafe(9), now.isoformat(), sub_id, now.isoformat()))
         bid = cur.lastrowid
         c.execute("INSERT INTO members (brand_id, tg_id, role, joined_at) VALUES (?,?,?,?)",
-                  (bid, owner_id, "owner", _now().isoformat()))
+                  (bid, owner_id, "owner", now.isoformat()))
         c.execute("UPDATE users SET active_brand=? WHERE tg_id=?", (bid, owner_id))
-    seed_templates(bid)
+    if seed:
+        seed_templates(bid, lang or (get_user(owner_id) or {}).get("lang") or "ru")
     return bid
 
 
@@ -267,11 +321,12 @@ def user_brands(tg_id: int) -> list:
         rows = c.execute(
             "SELECT b.*, m.role FROM brands b JOIN members m ON m.brand_id=b.id "
             "WHERE m.tg_id=? ORDER BY b.id", (tg_id,)).fetchall()
-        out = []
-        for r in rows:
-            b = _brand_row(r)
-            out.append(b)
-        return out
+        return [_brand_row(r) for r in rows]
+
+
+def owned_roots(tg_id: int) -> list:
+    """Подписки, которыми человек владеет (корневые бренды)."""
+    return [b for b in user_brands(tg_id) if b["role"] == "owner" and b["root_id"] == b["id"]]
 
 
 def member_role(brand_id: int, tg_id: int):
@@ -279,6 +334,18 @@ def member_role(brand_id: int, tg_id: int):
         row = c.execute("SELECT role FROM members WHERE brand_id=? AND tg_id=?",
                         (brand_id, tg_id)).fetchone()
         return row["role"] if row else None
+
+
+def can_edit(brand_id: int, tg_id: int) -> bool:
+    return member_role(brand_id, tg_id) in EDITOR_ROLES
+
+
+def editor_user_ids() -> list:
+    """Все, кто может открыть редактор хотя бы одного бренда."""
+    with _conn() as c:
+        return [r["tg_id"] for r in c.execute(
+            "SELECT DISTINCT tg_id FROM members WHERE role IN (%s)" % ",".join("?" * len(EDITOR_ROLES)),
+            EDITOR_ROLES)]
 
 
 def member_count(brand_id: int) -> int:
@@ -302,6 +369,7 @@ def remove_member(brand_id: int, tg_id: int):
     """Убирает человека из одного бренда. Если это был его активный бренд — переключает."""
     with _conn() as c:
         c.execute("DELETE FROM members WHERE brand_id=? AND tg_id=? AND role != 'owner'", (brand_id, tg_id))
+        c.execute("DELETE FROM sessions WHERE brand_id=? AND tg_id=?", (brand_id, tg_id))
         u = c.execute("SELECT active_brand FROM users WHERE tg_id=?", (tg_id,)).fetchone()
         if u and u["active_brand"] == brand_id:
             nxt = c.execute("SELECT brand_id FROM members WHERE tg_id=? ORDER BY brand_id LIMIT 1", (tg_id,)).fetchone()
@@ -322,20 +390,49 @@ def list_brands() -> list:
         return [_brand_row(r) for r in rows]
 
 
+def find_brands(q: str) -> list:
+    """Поиск для поддержки: #id, id, часть названия или @username владельца."""
+    q = (q or "").strip()
+    if not q:
+        return []
+    out = []
+    if q.lstrip("#").isdigit():
+        b = get_brand(int(q.lstrip("#")))
+        if b:
+            out.append(b)
+    ql = q.lower().lstrip("@")
+    owners = {}
+    with _conn() as c:
+        for r in c.execute("SELECT tg_id, username, name FROM users"):
+            owners[r["tg_id"]] = ((r["username"] or "") + " " + (r["name"] or "")).lower()
+    for b in list_brands():
+        if b in out:
+            continue
+        if ql in (b["kit"].get("name") or "").lower() or ql in owners.get(b["owner_id"], ""):
+            out.append(b)
+    return out[:10]
+
+
 def extend_brand(brand_id: int, days: int, plan: str = None) -> bool:
+    """Продление подписки. Если срок уже истёк — новый период начинается сейчас."""
     brand_id = root_id(brand_id) if get_brand(brand_id) else brand_id
     b = get_brand(brand_id)
     if not b:
         return False
+    now = _now()
     try:
         cur = datetime.fromisoformat(b["plan_until"])
     except Exception:
-        cur = _now()
-    base = max(cur, _now())
+        cur = now
+    lapsed = cur <= now
+    base = max(cur, now)
     until = (base + timedelta(days=days)).isoformat()
     with _conn() as c:
-        c.execute("UPDATE brands SET plan_until=?, plan=? WHERE id=?",
-                  (until, plan or b["plan"], brand_id))
+        if lapsed:
+            c.execute("UPDATE brands SET plan_until=?, plan=?, period_anchor=? WHERE id=?",
+                      (until, plan or b["plan"], now.isoformat(), brand_id))
+        else:
+            c.execute("UPDATE brands SET plan_until=?, plan=? WHERE id=?", (until, plan or b["plan"], brand_id))
     return True
 
 
@@ -346,6 +443,48 @@ def plan_active(brand: dict) -> bool:
         return datetime.fromisoformat(brand["plan_until"]) > _now()
     except Exception:
         return False
+
+
+# ============ Удаление ============
+def _delete_brand_rows(c, bid):
+    for sql in ("DELETE FROM templates WHERE brand_id=?", "DELETE FROM assets WHERE brand_id=?",
+                "DELETE FROM members WHERE brand_id=?", "DELETE FROM events WHERE brand_id=?",
+                "DELETE FROM prefs WHERE brand_id=?", "DELETE FROM sessions WHERE brand_id=?",
+                "DELETE FROM analytics WHERE brand_id=?", "DELETE FROM brands WHERE id=?"):
+        c.execute(sql, (bid,))
+    c.execute("UPDATE users SET active_brand=NULL WHERE active_brand=?", (bid,))
+
+
+def delete_brand(brand_id: int) -> list:
+    """Удаляет бренд со всеми шаблонами, файлами и статистикой. Корень подписки —
+    вместе со всеми её брендами. Возвращает id удалённых брендов."""
+    b = get_brand(brand_id)
+    if not b:
+        return []
+    ids = sub_brand_ids(brand_id) if b["root_id"] == b["id"] else [brand_id]
+    with _conn() as c:
+        for bid in ids:
+            _delete_brand_rows(c, bid)
+    return ids
+
+
+def delete_user(tg_id: int) -> list:
+    """Удаляет всё о человеке: его подписки (со всеми брендами), участие в чужих брендах,
+    сессии, настройки, журнал сообщений и статистику. Возвращает id удалённых брендов."""
+    gone = []
+    for b in owned_roots(tg_id):
+        gone += delete_brand(b["id"])
+    for b in user_brands(tg_id):          # дочерние бренды в чужих подписках, где он владелец
+        if b["role"] == "owner":
+            gone += delete_brand(b["id"])
+    with _conn() as c:
+        for sql in ("DELETE FROM members WHERE tg_id=?", "DELETE FROM sessions WHERE tg_id=?",
+                    "DELETE FROM prefs WHERE tg_id=?", "DELETE FROM msglog WHERE chat_id=?",
+                    "DELETE FROM analytics WHERE tg_id=?", "DELETE FROM access_requests WHERE tg_id=?",
+                    "DELETE FROM users WHERE tg_id=?"):
+            c.execute(sql, (tg_id,))
+        c.execute("UPDATE events SET tg_id=0 WHERE tg_id=?", (tg_id,))   # фото в чужих брендах — без имени
+    return gone
 
 
 # ============ Ассеты (логотипы, шрифт, фото-образец) ============
@@ -367,6 +506,11 @@ def del_asset(brand_id: int, kind: str):
         c.execute("DELETE FROM assets WHERE brand_id=? AND kind=?", (brand_id, kind))
 
 
+def has_asset(brand_id: int, kind: str) -> bool:
+    with _conn() as c:
+        return c.execute("SELECT 1 FROM assets WHERE brand_id=? AND kind=?", (brand_id, kind)).fetchone() is not None
+
+
 # ============ Инвайт-коды ============
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # без 0/O/1/I — не путаются
 
@@ -378,6 +522,16 @@ def create_invite(plan: str, days: int, max_uses: int = 1) -> str:
         c.execute("INSERT INTO invites (code, plan, days, max_uses, uses, created_at) VALUES (?,?,?,?,0,?)",
                   (code, plan, days, max_uses, _now().isoformat()))
     return code
+
+
+def peek_invite(code: str):
+    """Код ещё действует? → (plan, days) без траты использования, иначе None."""
+    code = (code or "").strip().upper()
+    with _conn() as c:
+        row = c.execute("SELECT * FROM invites WHERE code=?", (code,)).fetchone()
+    if not row or row["uses"] >= row["max_uses"]:
+        return None
+    return row["plan"], row["days"]
 
 
 def redeem_invite(code: str):
@@ -398,31 +552,45 @@ def list_invites() -> list:
         return [dict(r) for r in c.execute("SELECT * FROM invites ORDER BY created_at DESC LIMIT 30")]
 
 
-# ============ Использование ============
-def month_start():
-    n = _now()
-    return n.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+# ============ Использование: период подписки ============
+def period_bounds(brand: dict, now=None):
+    """Текущий 30-дневный период подписки: (начало, конец). Считается от даты активации,
+    а не от 1-го числа — клиент, подключившийся 25-го, не получает двойной лимит."""
+    now = now or _now()
+    try:
+        anchor = datetime.fromisoformat(brand.get("period_anchor") or brand.get("created_at"))
+    except Exception:
+        anchor = now
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    if anchor > now:
+        return anchor, anchor + timedelta(days=PERIOD_DAYS)
+    k = int((now - anchor) / timedelta(days=PERIOD_DAYS))
+    start = anchor + timedelta(days=PERIOD_DAYS * k)
+    return start, start + timedelta(days=PERIOD_DAYS)
+
+
+def period_start(brand_id: int):
+    b = get_brand(root_id(brand_id))
+    return period_bounds(b)[0] if b else _now()
 
 
 def photos_used(brand_id: int) -> int:
-    """Фото за месяц по всей подписке (все её бренды)."""
+    """Фото за текущий период по всей подписке (все её бренды)."""
     ids = sub_brand_ids(brand_id)
+    start = period_start(brand_id).isoformat()
     with _conn() as c:
         return c.execute("SELECT COALESCE(SUM(photos),0) FROM events WHERE brand_id IN (%s) AND ts>=?"
-                         % ",".join("?" * len(ids)), (*ids, month_start().isoformat())).fetchone()[0]
+                         % ",".join("?" * len(ids)), (*ids, start)).fetchone()[0]
 
 
-def record_event(brand_id: int, tg_id: int, template: str, photos: int):
+def record_event(brand_id: int, tg_id: int, template, photos: int):
+    """Выдача файлов: сколько фото и по какому шаблону (id) — для лимита и статистики."""
     if photos <= 0:
         return
     with _conn() as c:
         c.execute("INSERT INTO events (brand_id, tg_id, template, photos, ts) VALUES (?,?,?,?,?)",
-                  (brand_id, tg_id, template, photos, _now().isoformat()))
-
-
-def has_asset(brand_id: int, kind: str) -> bool:
-    with _conn() as c:
-        return c.execute("SELECT 1 FROM assets WHERE brand_id=? AND kind=?", (brand_id, kind)).fetchone() is not None
+                  (brand_id, tg_id, str(template), photos, _now().isoformat()))
 
 
 def regen_token(brand_id: int) -> str:
@@ -433,11 +601,14 @@ def regen_token(brand_id: int) -> str:
 
 
 # ============ Шаблоны ============
-def seed_templates(brand_id: int, lang: str = "ru"):
+def seed_templates(brand_id: int, lang: str = "ru", keys=None):
     import spec as S
-    for key in S.SEED_PRESETS:
+    ids = []
+    for key in keys or S.SEED_PRESETS:
         p = S.preset(key)
-        create_template(brand_id, p["name"].get(lang) or p["name"]["ru"], S.preset_spec(key))
+        if p:
+            ids.append(create_template(brand_id, p["name"].get(lang) or p["name"]["ru"], S.preset_spec(key)))
+    return ids
 
 
 def _tpl_row(r):
@@ -466,11 +637,15 @@ def template_count(brand_id: int) -> int:
         return c.execute("SELECT COUNT(*) FROM templates WHERE brand_id=?", (brand_id,)).fetchone()[0]
 
 
-def create_template(brand_id: int, name: str, spec: dict):
+def create_template(brand_id: int, name: str, spec: dict, first: bool = False):
+    """first=True — шаблон встаёт первым (шаблон по умолчанию)."""
     if template_count(brand_id) >= MAX_TEMPLATES:
         return None
     with _conn() as c:
-        sort = c.execute("SELECT COALESCE(MAX(sort),0)+1 FROM templates WHERE brand_id=?", (brand_id,)).fetchone()[0]
+        if first:
+            sort = c.execute("SELECT COALESCE(MIN(sort),1)-1 FROM templates WHERE brand_id=?", (brand_id,)).fetchone()[0]
+        else:
+            sort = c.execute("SELECT COALESCE(MAX(sort),0)+1 FROM templates WHERE brand_id=?", (brand_id,)).fetchone()[0]
         cur = c.execute("INSERT INTO templates (brand_id, name, spec, sort, updated_at) VALUES (?,?,?,?,?)",
                         (brand_id, name[:40], json.dumps(spec, ensure_ascii=False), sort, _now().isoformat()))
         return cur.lastrowid
@@ -528,12 +703,12 @@ def gc_images(brand_id: int) -> int:
 
 
 # ============ Вход на компьютере: одноразовая ссылка → сессия ============
+# В базе лежит только sha256 от токена: утечка файла базы не даёт войти в чужой редактор.
 LINK_TTL_MIN = 15
 SESSION_TTL_DAYS = 7
 
 
 def _token():
-    import secrets
     return secrets.token_urlsafe(24)
 
 
@@ -543,22 +718,23 @@ def create_login_link(tg_id: int, brand_id: int) -> str:
     with _conn() as c:
         c.execute("DELETE FROM sessions WHERE expires < ?", (_now().isoformat(),))
         c.execute("INSERT INTO sessions (token, kind, tg_id, brand_id, expires) VALUES (?,?,?,?,?)",
-                  (tok, "link", tg_id, brand_id, exp.isoformat()))
+                  (_hash_token(tok), "link", tg_id, brand_id, exp.isoformat()))
     return tok
 
 
 def redeem_login_link(tok: str):
     """Одноразовая ссылка → (session_token, tg_id, brand_id) или None."""
+    h = _hash_token(tok or "")
     with _conn() as c:
-        r = c.execute("SELECT * FROM sessions WHERE token=? AND kind='link'", (tok or "",)).fetchone()
+        r = c.execute("SELECT * FROM sessions WHERE token=? AND kind='link'", (h,)).fetchone()
         if not r:
             return None
-        c.execute("DELETE FROM sessions WHERE token=?", (tok,))
+        c.execute("DELETE FROM sessions WHERE token=?", (h,))
         if r["expires"] < _now().isoformat():
             return None
         sess = _token()
         c.execute("INSERT INTO sessions (token, kind, tg_id, brand_id, expires) VALUES (?,?,?,?,?)",
-                  (sess, "session", r["tg_id"], r["brand_id"],
+                  (_hash_token(sess), "session", r["tg_id"], r["brand_id"],
                    (_now() + timedelta(days=SESSION_TTL_DAYS)).isoformat()))
         return sess, r["tg_id"], r["brand_id"]
 
@@ -567,7 +743,7 @@ def check_session(tok: str):
     if not tok:
         return None
     with _conn() as c:
-        r = c.execute("SELECT * FROM sessions WHERE token=? AND kind='session'", (tok,)).fetchone()
+        r = c.execute("SELECT * FROM sessions WHERE token=? AND kind='session'", (_hash_token(tok),)).fetchone()
     if not r or r["expires"] < _now().isoformat():
         return None
     return r["tg_id"], r["brand_id"]
@@ -575,7 +751,19 @@ def check_session(tok: str):
 
 def drop_session(tok: str):
     with _conn() as c:
-        c.execute("DELETE FROM sessions WHERE token=?", (tok or "",))
+        c.execute("DELETE FROM sessions WHERE token=?", (_hash_token(tok or ""),))
+
+
+def drop_user_sessions(tg_id: int) -> int:
+    """«Выйти на всех компьютерах»."""
+    with _conn() as c:
+        return c.execute("DELETE FROM sessions WHERE tg_id=?", (tg_id,)).rowcount
+
+
+def session_count(tg_id: int) -> int:
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) FROM sessions WHERE tg_id=? AND kind='session' AND expires>?",
+                         (tg_id, _now().isoformat())).fetchone()[0]
 
 
 # ============ Админ: режимы подписки для проверки ============
@@ -600,13 +788,16 @@ def expire_brand(brand_id: int):
 
 
 def reset_usage(brand_id: int):
-    """Обнуляет счётчик фото за текущий месяц (всей подписки)."""
+    """Обнуляет счётчик фото за текущий период (всей подписки)."""
+    start = period_start(brand_id).isoformat()
     with _conn() as c:
         for bid in sub_brand_ids(brand_id):
-            c.execute("DELETE FROM events WHERE brand_id=? AND ts>=?", (bid, month_start().isoformat()))
+            c.execute("DELETE FROM events WHERE brand_id=? AND ts>=?", (bid, start))
 
 
 def set_member_role(brand_id: int, tg_id: int, role: str):
+    if role not in ROLES:
+        return
     with _conn() as c:
         c.execute("UPDATE members SET role=? WHERE brand_id=? AND tg_id=?", (role, brand_id, tg_id))
 
@@ -646,8 +837,8 @@ def touch_user(tg_id: int, name: str, username: str):
 
 
 def team_stats(brand_id: int) -> list:
-    """Участники бренда и их активность в этом бренде."""
-    ms = month_start().isoformat()
+    """Участники бренда и их активность в этом бренде за текущий период подписки."""
+    ms = period_start(brand_id).isoformat()
     with _conn() as c:
         rows = c.execute("""
             SELECT m.tg_id, m.role, m.joined_at, u.name, u.username, u.last_seen,
@@ -662,3 +853,113 @@ def team_stats(brand_id: int) -> list:
             GROUP BY m.tg_id
             ORDER BY (m.role = 'owner') DESC, photos_month DESC, m.joined_at""", (ms, ms, brand_id)).fetchall()
     return [dict(r) for r in rows]
+
+
+# ============ Аналитика: события пилота ============
+# kind: start, access_request, code_ok, kit_name, kit_logo, kit_color, onboard_style, draft,
+# preview, pult, files, editor_open, tpl_save, tpl_create, error, delete_brand, delete_user
+def log_event(kind: str, tg_id: int = None, brand_id: int = None, **data):
+    try:
+        with _conn() as c:
+            c.execute("INSERT INTO analytics (ts, tg_id, brand_id, kind, data) VALUES (?,?,?,?,?)",
+                      (_now().isoformat(), tg_id, brand_id, kind,
+                       json.dumps(data, ensure_ascii=False) if data else None))
+    except Exception as e:
+        logger.warning("analytics %s: %s", kind, e)
+
+
+def events(kind=None, since=None, brand_id=None) -> list:
+    q, args = "SELECT * FROM analytics WHERE 1=1", []
+    if kind:
+        kinds = [kind] if isinstance(kind, str) else list(kind)
+        q += " AND kind IN (%s)" % ",".join("?" * len(kinds))
+        args += kinds
+    if since:
+        q += " AND ts>=?"
+        args.append(since.isoformat() if hasattr(since, "isoformat") else since)
+    if brand_id:
+        q += " AND brand_id=?"
+        args.append(brand_id)
+    with _conn() as c:
+        rows = [dict(r) for r in c.execute(q + " ORDER BY ts, id", args)]
+    for r in rows:
+        try:
+            r["data"] = json.loads(r["data"]) if r["data"] else {}
+        except Exception:
+            r["data"] = {}
+    return rows
+
+
+def recent_titles(brand_id: int, limit=5) -> list:
+    """Последние настоящие заголовки клиента — для превью в редакторе."""
+    out = []
+    with _conn() as c:
+        for r in c.execute("SELECT data FROM analytics WHERE brand_id=? AND kind='draft' ORDER BY id DESC LIMIT 60",
+                           (brand_id,)):
+            try:
+                t = (json.loads(r["data"] or "{}").get("title") or "").strip()
+            except Exception:
+                t = ""
+            if t and t not in out:
+                out.append(t)
+            if len(out) >= limit:
+                break
+    return out
+
+
+# ============ Заявки на доступ ============
+def create_request(tg_id: int, name: str, username: str, channel: str) -> int:
+    with _conn() as c:
+        return c.execute("INSERT INTO access_requests (tg_id, name, username, channel, status, created_at) "
+                         "VALUES (?,?,?,?, 'new', ?)",
+                         (tg_id, (name or "")[:64], (username or "")[:64], (channel or "")[:300],
+                          _now().isoformat())).lastrowid
+
+
+def get_request(rid: int):
+    with _conn() as c:
+        r = c.execute("SELECT * FROM access_requests WHERE id=?", (rid,)).fetchone()
+        return dict(r) if r else None
+
+
+def set_request_status(rid: int, status: str) -> bool:
+    """Меняет статус, только если заявка ещё новая (два админа не одобрят дважды)."""
+    with _conn() as c:
+        return c.execute("UPDATE access_requests SET status=?, handled_at=? WHERE id=? AND status='new'",
+                         (status, _now().isoformat(), rid)).rowcount == 1
+
+
+def open_request(tg_id: int):
+    with _conn() as c:
+        r = c.execute("SELECT * FROM access_requests WHERE tg_id=? AND status='new' ORDER BY id DESC LIMIT 1",
+                      (tg_id,)).fetchone()
+        return dict(r) if r else None
+
+
+# ============ Резервные копии ============
+def backup(dest_dir: str = None, keep: int = BACKUP_KEEP) -> str:
+    """Горячая копия базы (SQLite backup API — без остановки бота), сжатая gzip.
+    Хранятся последние keep копий. Возвращает путь к файлу."""
+    dest_dir = dest_dir or BACKUP_DIR
+    os.makedirs(dest_dir, exist_ok=True)
+    stamp = _now().strftime("%Y%m%d-%H%M%S")
+    raw = os.path.join(dest_dir, f"numbus-{stamp}.db")
+    src = sqlite3.connect(DB_PATH, timeout=30)
+    try:
+        dst = sqlite3.connect(raw)
+        with dst:
+            src.backup(dst)
+        dst.close()
+    finally:
+        src.close()
+    gz = raw + ".gz"
+    with open(raw, "rb") as fi, gzip.open(gz, "wb", compresslevel=6) as fo:
+        shutil.copyfileobj(fi, fo)
+    os.remove(raw)
+    files = sorted(f for f in os.listdir(dest_dir) if f.startswith("numbus-") and f.endswith(".db.gz"))
+    for f in files[:-keep]:
+        try:
+            os.remove(os.path.join(dest_dir, f))
+        except OSError:
+            pass
+    return gz

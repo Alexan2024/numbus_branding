@@ -30,6 +30,7 @@ import render as R
 logger = logging.getLogger("numbus.import")
 
 WORK_W = 1920          # ширина, к которой приводится макет
+PSD_MAX_PIXELS = 50_000_000     # 50 Мп: больше — просим уменьшить холст
 MAX_PIECES = 24
 
 
@@ -383,6 +384,8 @@ def parse_psd(data, name=""):
     except Exception as e:
         raise ImportFail("psd_bad", str(e))
     W, H = psd.size
+    if W * H > PSD_MAX_PIXELS:      # сборка слоёв такого макета съест всю память сервера
+        raise ImportFail("psd_big", f"{W}x{H}")
     k = WORK_W / W
     lay = Layout(WORK_W, round(H * k), name)
     exclude = set()

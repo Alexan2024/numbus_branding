@@ -1,0 +1,36 @@
+# Сервер в России (Selectel, Timeweb Cloud, Yandex Cloud, VK Cloud): бот + редактор и Caddy,
+# который сам получает HTTPS-сертификат для домена. Запуск: cp .env.example .env → заполнить →
+# docker compose up -d --build. База, копии и черновики — в папке ./data рядом с этим файлом.
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      PORT: "8080"
+    volumes:
+      - ./data:/data
+    expose:
+      - "8080"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [bot]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?укажите DOMAIN в .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

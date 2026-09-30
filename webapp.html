@@ -163,6 +163,7 @@ textarea { resize: vertical; min-height: 64px; }
 .drawer-head { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
 .drawer-head h3 { flex: 1; margin: 6px 0; }
 @media (max-width: 899px) {
+  .stage { padding: 8px 16px 10px; gap: 12px; }
   #props.drawer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 8; margin: 0; max-height: 46vh; overflow: auto;
     border-radius: 16px 16px 0 0; box-shadow: 0 -1px 0 var(--line), 0 -12px 32px rgba(0,0,0,.12);
     padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
@@ -177,11 +178,33 @@ textarea { resize: vertical; min-height: 64px; }
   #app.editor .col-side { height: 100vh; overflow: auto; }
   body.browser { padding-bottom: 0; }
 }
-@media (prefers-reduced-motion: reduce) { .sheet { animation: none; } .switch::after { transition: none; } }
+/* ---------- загрузка ---------- */
+.boot { min-height: 70vh; display: grid; place-content: center; text-align: center; }
+.boot b { font-size: 22px; letter-spacing: .32em; padding-left: .32em; font-weight: 700; animation: breathe 1.6s ease-in-out infinite; }
+.boot p { color: var(--hint); font-size: 14px; max-width: 320px; margin: 14px auto 0; }
+@keyframes breathe { 50% { opacity: .35; } }
+/* ---------- готовые стили ---------- */
+.looks { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 4px 0 12px; }
+.looks button { border: 0; background: none; padding: 0; text-align: left; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.looks canvas { width: 100%; border-radius: 6px; box-shadow: 0 0 0 1px var(--line); }
+/* ---------- палитра, логотип, шрифты ---------- */
+.palette { flex-wrap: wrap; }
+.pal { display: flex; flex-direction: column; align-items: center; gap: 5px; width: 58px; font-size: 11px; line-height: 1.2; color: var(--hint); text-align: center; }
+.chipsrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 6px 0 10px; }
+.logo-pair { display: flex; gap: 6px; flex: 0 0 auto; }
+.logo-pair .thumb { width: 60px; height: 44px; }
+.asset .thumb.light { background: #f4f2ee; }
+.asset .thumb.dark { background: #1b1b1d; }
+.sample-line { font-size: 20px; line-height: 1.25; overflow-wrap: anywhere; }
+.warn { color: var(--danger); font-size: 13px; }
+.note { margin: 0; padding: 8px 12px; border-radius: 9px; background: var(--bg); font-size: 13px; max-width: 520px; box-shadow: 0 0 0 1px var(--line); }
+.tbtn { border: 0; background: transparent; color: var(--hint); font-size: 12px; padding: 4px 6px; border-radius: 6px; flex: 0 0 auto; }
+.stagebar .chip:disabled { opacity: .35; }
+@media (prefers-reduced-motion: reduce) { .sheet { animation: none; } .switch::after { transition: none; } .boot b { animation: none; } }
 </style>
 </head>
 <body>
-<div id="app"><div class="empty" id="boot">…</div></div>
+<div id="app"><div class="boot" id="boot"><b>NUMBUS</b></div></div>
 <script>
 "use strict";
 /* ============================================================
@@ -191,7 +214,7 @@ textarea { resize: vertical; min-height: 64px; }
    ============================================================ */
 const tg = window.Telegram && window.Telegram.WebApp;
 const QS = new URLSearchParams(location.search);
-const BID = QS.get("b") || "";
+let BID = QS.get("b") || "";         // без ?b= (кнопка меню бота) бренд определит сервер
 const INIT = (tg && tg.initData) || "";
 const IN_TG = !!INIT;               // внутри Telegram; иначе — браузер на компьютере
 let SESSION = "";
@@ -216,7 +239,7 @@ const TT = {
     stroke: "Толщина контура", fill: "Заливка", outline: "Контур", fit: "Размер", fitBox: "Свой", fitInset: "По краю кадра", margin: "Отступ от края",
     side: "Сторона", extent: "Высота", adaptiveShade: "Плотнее на светлом фоне",
     fixed: "Цвет", adaptive: "Авто", contrast: "Контраст", original: "Оригинал", light: "На тёмном", dark: "На светлом",
-    srcTitle: "Заголовок", srcSubtitle: "Подзаголовок", srcHashtag: "Хештег", srcCounter: "Счётчик", srcStatic: "Надпись",
+    srcTitle: "Заголовок", srcSubtitle: "Подзаголовок", srcHashtag: "Рубрика", srcCounter: "Счётчик", srcStatic: "Надпись",
     tLogo: "Логотип", tText: "Текст", tRect: "Фигура", tFrame: "Рамка", tGradient: "Градиент", tOverlay: "Затемнение",
     top: "Верх", bottom: "Низ", left: "Лево", right: "Право", nowrap: "без переноса",
     storyOff: "Сторис для этого шаблона выключены.", storyOn: "Делать сторис", storyEnable: "Включить сторис",
@@ -227,7 +250,7 @@ const TT = {
     bgRemoved: "Фон убран автоматически", errLogo: "Не удалось прочитать логотип — пришлите PNG или JPG.",
     errLogoEmpty: "На картинке не видно логотипа — он сливается с фоном.", errFont: "Файл не похож на шрифт TTF/OTF.",
     errPhoto: "Не удалось открыть фото.", errNet: "Нет связи с сервером. Попробуйте ещё раз.",
-    errAuth: "Откройте редактор кнопкой в боте.", errOwner: "Редактор доступен только владельцу бренда.",
+    errAuth: "Откройте редактор кнопкой в боте.", errOwner: "Редактор стиля доступен владельцу и дизайнеру бренда. Чтобы сделать пост, пришлите фото боту.",
     errLimit: "Достигнут лимит шаблонов.", previewTitle: "Заголовок поста в две строки", previewSub: "Подзаголовок",
     sheetClose: "Закрыть", selectHint: "Выберите слой в списке или на картинке.", tplName: "Название шаблона",
     up: "Выше", down: "Ниже", hide: "Скрыть", show: "Показать",
@@ -256,6 +279,30 @@ const TT = {
     corner: "Угол", look: "Вид", lookText: "Текст", fine: "Тонкая настройка слоёв", undo: "Отменить", redo: "Вернуть",
     logout: "Выйти на этом компьютере", errLogin: "Вход истёк или ссылка уже использована. Запросите новую в боте командой /desktop.",
     back: "Шаблоны", close: "Закрыть", place: "Положение",
+    modeSimple: "Простой", modeDesigner: "Для дизайнера", looks: "Готовые стили",
+    looksHint: "Нажмите на стиль, чтобы примерить его. Вернуть как было — «Отменить» над картинкой.",
+    brandColors: "Цвета бренда", brandColorsHint: "Цвета общие для всех шаблонов бренда.", fromLogo: "Взять из логотипа",
+    fromLogoNone: "В логотипе нет ярких цветов — выберите акцент сами.", fromLogoPick: "Нажмите на цвет, чтобы сделать его акцентом.",
+    fontPair: "Шрифты", pairOwn: "Свой набор", ownFont: "Свой шрифт",
+    cover: "Обложка", slide2: "Кадр 2", safeZones: "Безопасные зоны",
+    safeHintStory: "Сверху и снизу сторис Telegram и Instagram закрывают кнопками и подписью — важное держите в середине.",
+    safeHintFeed: "Пунктир — как пост обрежется в сетке профиля (3:4). Линии полей — 6% от края.",
+    slidesRule: "Где показывать", slidesAll: "На всех", slidesFirst: "Обложка", slidesRest: "Кроме обложки",
+    lines: "Строк максимум", linesNone: "без ограничения", shadow: "Тень", shadowBlur: "Размытие",
+    shadowOpacity: "Плотность тени", shadowColor: "Цвет тени",
+    fromLayout: "Из макета: PSD, AI, PDF или Figma", blankHint: "Пустой шаблон — соберите слои сами",
+    noteCut: "Заголовок не поместился — в посте он будет обрезан многоточием. Сократите текст или уменьшите кегль.",
+    noteSmall: "Заголовок длинный — в посте шрифт станет немного меньше.",
+    fontMissing: "В шрифте нет знаков {list} — их нарисует Inter.", fontSample: "Съешь ещё этих мягких булок — 350 ₽, № 5",
+    fontNoCyr: "В шрифте нет кириллицы — русский текст нарисует Inter.",
+    fontNoCyrSigns: "В шрифте нет кириллицы и знаков {list} — их нарисует Inter.",
+    onLight: "На светлом", onDark: "На тёмном", recent: "Недавние заголовки",
+    center: "Центр", middle: "Середина", tl: "Слева сверху", tr: "Справа сверху", bl: "Слева снизу", br: "Справа снизу",
+    caseNone: "Как есть", caseUpper: "ПРОПИСНЫЕ", caseLower: "строчные", srcRubric: "Рубрика", srcLabel: "Надпись",
+    visible: "видно", hiddenL: "скрыт", errRate: "Слишком много запросов подряд — подождите минуту.",
+    e_psd_big: "Макет слишком большой — больше 50 мегапикселей. Уменьшите холст и попробуйте снова.",
+    e_logo_big: "Файл слишком большой — больше 100 мегапикселей. Загрузите логотип поменьше.",
+    loading: "Загружаю стиль…", modeHintDesigner: "Слои, безопасные зоны, импорт макетов.", toDesigner: "Режим для дизайнера",
   },
   en: {
     templates: "Templates", brand: "Brand", newTpl: "New template", chooseStart: "Start from",
@@ -275,7 +322,7 @@ const TT = {
     stroke: "Stroke width", fill: "Fill", outline: "Outline", fit: "Size", fitBox: "Custom", fitInset: "Frame edge", margin: "Edge margin",
     side: "Side", extent: "Extent", adaptiveShade: "Denser on light backgrounds",
     fixed: "Colour", adaptive: "Auto", contrast: "Contrast", original: "Original", light: "On dark", dark: "On light",
-    srcTitle: "Headline", srcSubtitle: "Subheadline", srcHashtag: "Hashtag", srcCounter: "Counter", srcStatic: "Label",
+    srcTitle: "Headline", srcSubtitle: "Subheadline", srcHashtag: "Tag", srcCounter: "Counter", srcStatic: "Label",
     tLogo: "Logo", tText: "Text", tRect: "Shape", tFrame: "Frame", tGradient: "Gradient", tOverlay: "Shade",
     top: "Top", bottom: "Bottom", left: "Left", right: "Right", nowrap: "no wrap",
     storyOff: "Stories are off for this template.", storyOn: "Make stories", storyEnable: "Turn on stories",
@@ -286,7 +333,7 @@ const TT = {
     bgRemoved: "Background removed automatically", errLogo: "Couldn't read the logo — send a PNG or JPG.",
     errLogoEmpty: "No logo visible in the image — it blends into the background.", errFont: "This file doesn't look like a TTF/OTF font.",
     errPhoto: "Couldn't open the photo.", errNet: "Can't reach the server. Try again.",
-    errAuth: "Open the editor with the button in the bot.", errOwner: "Only the brand owner can use the editor.",
+    errAuth: "Open the editor with the button in the bot.", errOwner: "The style editor is available to the brand owner and designer. To make a post, send photos to the bot.",
     errLimit: "Template limit reached.", previewTitle: "A two-line post headline", previewSub: "Subheadline",
     sheetClose: "Close", selectHint: "Pick a layer in the list or on the image.", tplName: "Template name",
     up: "Up", down: "Down", hide: "Hide", show: "Show",
@@ -315,6 +362,30 @@ const TT = {
     corner: "Corner", look: "Look", lookText: "Text", fine: "Fine-tune layers", undo: "Undo", redo: "Redo",
     logout: "Sign out on this computer", errLogin: "Your sign-in expired or the link was already used. Get a new one in the bot with /desktop.",
     back: "Templates", close: "Close", place: "Placement",
+    modeSimple: "Simple", modeDesigner: "Designer", looks: "Ready-made styles",
+    looksHint: "Tap a style to try it on. To go back, tap “Undo” above the image.",
+    brandColors: "Brand colours", brandColorsHint: "Colours are shared by all of the brand's templates.", fromLogo: "Take from the logo",
+    fromLogoNone: "No bright colours in the logo — pick the accent yourself.", fromLogoPick: "Tap a colour to make it the accent.",
+    fontPair: "Fonts", pairOwn: "Custom set", ownFont: "Your font",
+    cover: "Cover", slide2: "Photo 2", safeZones: "Safe zones",
+    safeHintStory: "Telegram and Instagram cover the top and bottom of stories with buttons and captions — keep what matters in the middle.",
+    safeHintFeed: "Dashed lines show how the post is cropped in the profile grid (3:4). Margin lines are 6% from the edge.",
+    slidesRule: "Show on", slidesAll: "All photos", slidesFirst: "Cover", slidesRest: "All but cover",
+    lines: "Max lines", linesNone: "no limit", shadow: "Shadow", shadowBlur: "Blur",
+    shadowOpacity: "Shadow strength", shadowColor: "Shadow colour",
+    fromLayout: "From a layout: PSD, AI, PDF or Figma", blankHint: "An empty template — build the layers yourself",
+    noteCut: "The headline doesn't fit — the post will cut it with an ellipsis. Shorten the text or reduce the size.",
+    noteSmall: "The headline is long — the post will use a slightly smaller font.",
+    fontMissing: "The font has no {list} — Inter will draw them.", fontSample: "The quick brown fox — 350 ₽, № 5",
+    fontNoCyr: "The font has no Cyrillic — Inter will draw Russian text.",
+    fontNoCyrSigns: "The font has no Cyrillic or {list} — Inter will draw them.",
+    onLight: "On light", onDark: "On dark", recent: "Recent headlines",
+    center: "Centre", middle: "Middle", tl: "Top left", tr: "Top right", bl: "Bottom left", br: "Bottom right",
+    caseNone: "As typed", caseUpper: "UPPERCASE", caseLower: "lowercase", srcRubric: "Tag", srcLabel: "Label",
+    visible: "shown", hiddenL: "hidden", errRate: "Too many requests in a row — wait a minute.",
+    e_psd_big: "The layout is too large — over 50 megapixels. Reduce the canvas and try again.",
+    e_logo_big: "The file is too large — over 100 megapixels. Upload a smaller logo.",
+    loading: "Loading your style…", modeHintDesigner: "Layers, safe zones, layout import.", toDesigner: "Designer mode",
   },
 };
 let LANG = "ru";
@@ -367,7 +438,7 @@ async function api(method, path, body, isForm) {
 function errText(e) {
   if (e.code === "auth" && !IN_TG) return t("errLogin");
   if (e.code && TT.ru["e_" + e.code]) return t("e_" + e.code);
-  return ({ net: t("errNet"), auth: t("errAuth"), owner_only: t("errOwner"), logo_bad: t("errLogo"),
+  return ({ net: t("errNet"), auth: t("errAuth"), owner_only: t("errOwner"), logo_bad: t("errLogo"), rate: t("errRate"),
             logo_empty: t("errLogoEmpty"), font_bad: t("errFont"), photo_bad: t("errPhoto"), limit: t("errLimit") })[e.code] || t("errNet");
 }
 async function blobImage(blob) {
@@ -439,7 +510,7 @@ function rrPath(ctx, x, y, w, h, r) {
 }
 
 /* --- шрифты --- */
-const FONT_STATE = { loaded: new Set(), pending: {} };
+const FONT_STATE = { loaded: new Set(), pending: {}, faces: {} };
 function fontInfo(key) {
   const list = (APP.state && APP.state.fonts) || [];
   return list.find(f => f.key === key) || list.find(f => f.key === "inter") || { key: "inter", min: 100, max: 900 };
@@ -458,6 +529,8 @@ function ensureFont(key) {
     else src = `url(/fonts/${f.file})`;
     const face = new FontFace("nb-" + f.key, src, { weight: `${f.min} ${f.max}` });
     await face.load();
+    if (FONT_STATE.faces[f.key]) document.fonts.delete(FONT_STATE.faces[f.key]);   // шрифт в слоте заменили
+    FONT_STATE.faces[f.key] = face;
     document.fonts.add(face);
     FONT_STATE.loaded.add(f.key);
   })().catch(e => { console.warn("font", f.key, e); FONT_STATE.loaded.add(f.key); })
@@ -466,25 +539,111 @@ function ensureFont(key) {
   return p;
 }
 function fontsOf(layers) {
-  return [...new Set((layers || []).filter(L => L.type === "text" && !L.hidden).map(L => L.font))];
+  return [...new Set(["inter", ...(layers || []).filter(L => L.type === "text" && !L.hidden).map(L => L.font)])];
 }
 const qsize = s => Math.max(1, Math.round(s * 2) / 2);
+// Знаки, которых нет в шрифте (₽ в Playfair, № в Jost), браузер берёт из Inter — так же делает сервер
 function setFont(ctx, key, weight, size) {
-  ctx.font = `${Math.trunc(weight || 400)} ${qsize(size)}px "nb-${key}"`;
+  ctx.font = `${Math.trunc(weight || 400)} ${qsize(size)}px "nb-${key}", "nb-inter", sans-serif`;
 }
 
+/* <typograf> — зеркало typo.py: результат совпадает символ в символ (tests/test_typo.py) */
+const typograf = (() => {
+  const NBSP = String.fromCharCode(160);
+  const SHORT = new Set("для без над под при про изо обо ото подо надо вне или что как через перед между после около a an the of to in on at by or and".split(" "));
+  const PARTICLES = new Set("ли ль же ж бы б".split(" "));
+  const UNITS = new Set(("₽ руб руб. р. рубль рубля рублей $ € ₸ ₴ £ % ‰ ° °C °С км м см мм кг г мг т л мл ч мин сек шт шт. " +
+    "тыс тыс. млн млрд трлн чел чел. лет год года году гг. г. км/ч").split(" "));
+  const CYR = /[А-Яа-яЁё]/;
+  const WORD = /^[A-Za-zА-Яа-яЁё]+$/;
+  const LEAD = "«„“‘\"'([{", TRAIL = "»“”’\"'.,:;!?…)]}", STOP = ".,:;!?…";
+  const NUM = /^[0-9]+(?:[.,][0-9]+)?$/, D13 = /^[0-9]{1,3}$/, D3 = /^[0-9]{3}(?:[.,][0-9]+)?$/;
+  const INITIAL = /^[A-ZА-ЯЁ]\.$/;
+  const RANGE = /[0-9]+(?:[.,][0-9]+)?(?: ?[-–] ?[0-9]+(?:[.,][0-9]+)?)+/g;
+  const OPENERS = " " + NBSP + "\t([{«„“‘—–-/";
+  const DASH_MID = /(\S) (?:--|-|–|—) (?=\S)/g;
+  const DASH_NB = new RegExp("(\\S)" + NBSP + "(?:--|-|–) ", "g");
+  const DASH_START = /^(?:--|-|–|—) /;
+  function quotes(s, ru) {
+    const q = ru ? ["«", "»", "„", "“"] : ["“", "”", "‘", "’"];
+    const opens = ru ? "«„" : "“‘", closes = ru ? "»“" : "”";
+    const cs = Array.from(s);
+    let out = "", depth = 0;
+    for (let i = 0; i < cs.length; i++) {
+      const ch = cs[i];
+      if (ch === '"') {
+        const prev = i ? cs[i - 1] : " ";
+        if (OPENERS.includes(prev)) { out += depth === 0 ? q[0] : q[2]; depth++; }
+        else { depth = Math.max(0, depth - 1); out += depth === 0 ? q[1] : q[3]; }
+        continue;
+      }
+      if (opens.includes(ch)) depth++;
+      else if (closes.includes(ch) && depth) depth--;
+      out += ch;
+    }
+    return out;
+  }
+  function strip(s, lead, trail) {
+    const cs = Array.from(s);
+    let i = 0, j = cs.length;
+    while (i < j && lead.includes(cs[i])) i++;
+    while (j > i && trail.includes(cs[j - 1])) j--;
+    return cs.slice(i, j).join("");
+  }
+  function glue(tok, nxt, ru) {
+    const b = strip(tok, LEAD, TRAIL), nb = strip(nxt, LEAD, TRAIL);
+    const bl = b.toLowerCase(), nbl = nb.toLowerCase();
+    const last = Array.from(tok).pop();
+    if (tok && !STOP.includes(last) && WORD.test(b) && !PARTICLES.has(bl)
+        && ((Array.from(b).length <= 2 && CYR.test(b)) || SHORT.has(bl))) return true;
+    if (ru && PARTICLES.has(nbl) && WORD.test(nb)) return true;
+    const t = strip(tok, "", TRAIL), n = strip(nxt, "", ".,:;!?)…");
+    if (NUM.test(t) && (UNITS.has(n) || UNITS.has(n.toLowerCase()))) return true;
+    if (D13.test(tok) && D3.test(strip(nxt, "", TRAIL))) return true;
+    return INITIAL.test(tok);
+  }
+  function line(s, ru) {
+    s = s.replace(/[ \t]+/g, " ").replace(/^ +| +$/g, "");
+    if (!s) return s;
+    s = s.split("...").join("…");
+    s = quotes(s, ru);
+    if (!ru) s = s.replace(/([A-Za-z])'(?=[A-Za-z])/g, "$1’");
+    s = s.replace(RANGE, m => { const p = m.split(/ ?[-–] ?/); return p.length === 2 ? p.join("–") : m; });
+    s = s.replace(DASH_MID, "$1" + NBSP + "— ");
+    s = s.replace(DASH_NB, "$1" + NBSP + "— ");
+    s = s.replace(DASH_START, "—" + NBSP);
+    s = s.replace(/№ ?(?=[0-9])/g, "№" + NBSP).replace(/§ ?(?=[0-9])/g, "§" + NBSP);
+    const toks = s.split(" ");
+    let out = toks[0];
+    for (let i = 1; i < toks.length; i++) out += (glue(toks[i - 1], toks[i], ru) ? NBSP : " ") + toks[i];
+    return out;
+  }
+  return function typograf(s) {
+    if (!s) return "";
+    s = String(s).replace(/\r\n/g, "\n");
+    const ru = CYR.test(s);
+    return s.split("\n").map(x => line(x, ru)).join("\n");
+  };
+})();
+/* </typograf> */
+
 /* --- текст --- */
+const TEXT_LINES_DEFAULT = 5, SHRINK_STEPS = 6, ELLIPSIS = "…";
 function applyCase(s, c) { return c === "upper" ? s.toUpperCase() : c === "lower" ? s.toLowerCase() : s; }
 function textContent(L, env) {
   const f = env.fields;
   let s = "";
   const src = L.source || "static";
-  if (src === "title") s = f.title || "";
-  else if (src === "subtitle") s = f.subtitle || "";
+  if (src === "title") s = typograf(f.title || "");
+  else if (src === "subtitle") s = typograf(f.subtitle || "");
   else if (src === "hashtag") s = f.hashtag || "";
-  else if (src === "counter") s = f.n ? (L.text || "{i} / {n}").split("{i}").join(String(f.i || 1)).split("{n}").join(String(f.n)) : "";
+  else if (src === "counter") { const n = Math.trunc(f.n || 0); s = n > 1 ? (L.text || "{i} / {n}").split("{i}").join(String(f.i || 1)).split("{n}").join(String(n)) : ""; }
   else s = L.text || "";
   return applyCase(s, L.case || "none");
+}
+function maxLines(L) {
+  if (L.lines == null) return (L.source === "title" || L.source === "subtitle") ? TEXT_LINES_DEFAULT : 0;
+  return Math.trunc(L.lines);
 }
 const chars = s => Array.from(s);
 function trackedW(ctx, s, ls) { return s ? ctx.measureText(s).width + ls * (chars(s).length - 1) : 0; }
@@ -501,23 +660,45 @@ function wrap(ctx, text, ls, maxw) {
   }
   return out;
 }
+function truncateLines(ctx, lines, n, ls, maxw) {
+  const keep = lines.slice(0, n);
+  let last = keep[keep.length - 1];
+  while (maxw > 0 && last.includes(" ") && trackedW(ctx, last + ELLIPSIS, ls) > maxw) last = last.slice(0, last.lastIndexOf(" "));
+  keep[keep.length - 1] = last.replace(/[ ,;:—–-]+$/, "") + ELLIPSIS;
+  return keep;
+}
 function layoutText(ctx, L, env, content, W) {
-  let size = (L.size ?? 0.04) * W;
-  const key = fontKey(L.font), wt = L.weight || 400;
+  const size0 = (L.size ?? 0.04) * W;
+  const key = fontKey(L.font), wt = L.weight || 400, tr = L.tracking || 0;
+  const maxw = (L.maxw || 0) * W, nmax = maxLines(L);
+  let size = size0;
   setFont(ctx, key, wt, size);
-  let ls = (L.tracking || 0) * size;
-  const maxw = (L.maxw || 0) * W;
-  const lines = wrap(ctx, content, ls, maxw);
+  let ls = tr * size;
+  let lines = wrap(ctx, content, ls, maxw);
+  let small = false, cut = false;
+  if (nmax > 0 && lines.length > nmax) {
+    if (maxw > 0) {
+      for (let k = 1; k <= SHRINK_STEPS; k++) {
+        size = size0 * (1 - 0.05 * k);
+        setFont(ctx, key, wt, size);
+        ls = tr * size;
+        lines = wrap(ctx, content, ls, maxw);
+        if (lines.length <= nmax) break;
+      }
+      small = true;
+    }
+    if (lines.length > nmax) { lines = truncateLines(ctx, lines, nmax, ls, maxw); cut = true; }
+  }
   let widest = Math.max(0, ...lines.map(l => trackedW(ctx, l, ls)));
   if (maxw > 0 && widest > maxw) {
     size = size * maxw / widest;
     setFont(ctx, key, wt, size);
-    ls = (L.tracking || 0) * size;
+    ls = tr * size;
     widest = Math.max(0, ...lines.map(l => trackedW(ctx, l, ls)));
   }
   const cap = ctx.measureText("H").actualBoundingBoxAscent;
   const adv = (L.leading ?? 1.1) * size;
-  return { lines, size, ls, cap, adv, key, wt, w: widest, h: cap + (lines.length - 1) * adv };
+  return { lines, size, ls, cap, adv, key, wt, w: widest, h: cap + (lines.length - 1) * adv, small, cut };
 }
 function drawText(ctx, L, env) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
@@ -539,22 +720,52 @@ function drawText(ctx, L, env) {
   }
   const tx = left + padx, ty = top + pady;
   const col = resolveColor(L.color, env, ctx, [tx, ty, m.w, m.h]) || [255, 255, 255];
+  if (env.notes && (L.source === "title" || L.source === "subtitle") && (m.cut || m.small)) env.notes.add(L.source + (m.cut ? "_cut" : "_small"));
+  const sh = L.shadow;
+  const paint = () => {
+    const align = L.align || "left";
+    m.lines.forEach((ln, i) => {
+      const lw = trackedW(ctx, ln, m.ls);
+      const off = align === "left" ? 0 : align === "center" ? (m.w - lw) / 2 : m.w - lw;
+      const bx = tx + off, by = ty + m.cap + i * m.adv;
+      if (m.ls === 0) ctx.fillText(ln, bx, by);
+      else {
+        const cs = chars(ln);
+        cs.forEach((c, k) => ctx.fillText(c, bx + ctx.measureText(cs.slice(0, k).join("")).width + m.ls * k, by));
+      }
+    });
+  };
   setFont(ctx, m.key, m.wt, m.size);
-  ctx.fillStyle = rgb(col);
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
+  if (sh && (sh.blur ?? 0.35) > 0) {
+    // мягкая тень без смещения: как в render.py (размытие = blur·кегль, сигма — его половина)
+    const sc = resolveColor(sh.color, env, ctx, [tx, ty, m.w, m.h]) || [0, 0, 0];
+    const blur = (sh.blur ?? 0.35) * m.size;
+    const tmp = document.createElement("canvas");
+    tmp.width = ctx.canvas.width; tmp.height = ctx.canvas.height;
+    const t2 = tmp.getContext("2d");
+    t2.font = ctx.font; t2.textBaseline = "alphabetic"; t2.textAlign = "left";
+    t2.fillStyle = rgb(sc);
+    t2.globalAlpha = Math.round(255 * op) / 255;
+    t2.shadowColor = rgb(sc); t2.shadowBlur = blur; t2.shadowOffsetX = tmp.width * 2; t2.shadowOffsetY = 0;
+    // рисуем текст за краем, а тень — на месте: остаётся только тень
+    const saved = ctx; const fake = t2;
+    const align = L.align || "left";
+    m.lines.forEach((ln, i) => {
+      const lw = trackedW(saved, ln, m.ls);
+      const off = align === "left" ? 0 : align === "center" ? (m.w - lw) / 2 : m.w - lw;
+      const bx = tx + off - tmp.width * 2, by = ty + m.cap + i * m.adv;
+      if (m.ls === 0) fake.fillText(ln, bx, by);
+      else { const cs = chars(ln); cs.forEach((c, k) => fake.fillText(c, bx + saved.measureText(cs.slice(0, k).join("")).width + m.ls * k, by)); }
+    });
+    ctx.globalAlpha = sh.opacity ?? 0.5;
+    ctx.drawImage(tmp, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+  ctx.fillStyle = rgb(col);
   ctx.globalAlpha = Math.round(255 * op) / 255;
-  const align = L.align || "left";
-  m.lines.forEach((ln, i) => {
-    const lw = trackedW(ctx, ln, m.ls);
-    const off = align === "left" ? 0 : align === "center" ? (m.w - lw) / 2 : m.w - lw;
-    const bx = tx + off, by = ty + m.cap + i * m.adv;
-    if (m.ls === 0) ctx.fillText(ln, bx, by);
-    else {
-      const cs = chars(ln);
-      cs.forEach((c, k) => ctx.fillText(c, bx + ctx.measureText(cs.slice(0, k).join("")).width + m.ls * k, by));
-    }
-  });
+  paint();
   ctx.globalAlpha = 1;
   return [left, top, bw, bh];
 }
@@ -624,16 +835,18 @@ function drawGradient(ctx, L, env) {
   if (L.adaptive) a *= 0.4 + 0.6 * luma(...avgColor(ctx, zone)) / 255;
   a = Math.max(0, Math.min(0.99, a + (env.dark || 0)));
   const c = resolveColor(L.color, env, ctx, zone) || [0, 0, 0];
-  const g = side === "bottom" ? ctx.createLinearGradient(0, H - ext, 0, H)
-          : side === "top" ? ctx.createLinearGradient(0, ext, 0, 0)
-          : side === "left" ? ctx.createLinearGradient(ext, 0, 0, 0)
-          : ctx.createLinearGradient(W - ext, 0, W, 0);
-  g.addColorStop(0, `rgba(${c[0]},${c[1]},${c[2]},0)`);
-  g.addColorStop(1, `rgba(${c[0]},${c[1]},${c[2]},${a})`);
+  // от края кадра (полная плотность) внутрь зоны — по той же плавной кривой, что render.py
+  const g = side === "bottom" ? ctx.createLinearGradient(0, H, 0, H - ext)
+          : side === "top" ? ctx.createLinearGradient(0, 0, 0, ext)
+          : side === "left" ? ctx.createLinearGradient(0, 0, ext, 0)
+          : ctx.createLinearGradient(W, 0, W - ext, 0);
+  EASE_POS.forEach((p, i) => g.addColorStop(p, `rgba(${c[0]},${c[1]},${c[2]},${EASE_VAL[i] * a})`));
   ctx.fillStyle = g;
   ctx.fillRect(...zone);
   return zone;
 }
+const EASE_POS = [0, 0.19, 0.34, 0.47, 0.565, 0.65, 0.73, 0.802, 0.861, 0.91, 0.952, 0.982, 1];
+const EASE_VAL = [1, 0.738, 0.541, 0.382, 0.278, 0.194, 0.126, 0.075, 0.042, 0.021, 0.008, 0.002, 0];
 function drawOverlay(ctx, L, env) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
   const c = resolveColor(L.color, env, ctx, [0, 0, W, H]) || [0, 0, 0];
@@ -684,22 +897,26 @@ function drawImageLayer(ctx, L, env) {
 }
 const DRAW = { text: drawText, logo: drawLogo, rect: drawRect, gradient: drawGradient, overlay: drawOverlay, image: drawImageLayer };
 
-function drawPhoto(ctx, photo, W, H) {
+function drawPhoto(ctx, photo, W, H, focus) {
   const pw = photo.naturalWidth || photo.width, ph = photo.naturalHeight || photo.height;
   const ir = pw / ph, cr = W / H;
+  const [fx, fy] = focus || [0.5, 0.5];
   let dw, dh;
   if (ir > cr) { dh = H; dw = Math.round(H * ir); } else { dw = W; dh = Math.round(W / ir); }
   ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(photo, -Math.floor((dw - W) / 2), -Math.floor((dh - H) / 2), dw, dh);
+  ctx.drawImage(photo, -Math.floor((dw - W) * fx), -Math.floor((dh - H) * fy), dw, dh);
 }
+// слой только на обложке карусели (first) или только на остальных кадрах (rest)
+const onSlide = (L, i) => L.slides === "first" ? i <= 1 : L.slides === "rest" ? i > 1 : true;
 function renderSurface(canvas, W, H, photo, layers, env) {
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
-  if (photo) drawPhoto(ctx, photo, W, H);
+  if (photo) drawPhoto(ctx, photo, W, H, env.focus);
   const boxes = {};
+  const slide = Math.trunc((env.fields && env.fields.i) || 1);
   for (const L of layers || []) {
-    if (L.hidden) continue;
+    if (L.hidden || !onSlide(L, slide)) continue;
     const fn = DRAW[L.type];
     if (!fn) continue;
     try { const b = fn(ctx, L, env); if (b) boxes[L.id] = b; } catch (e) { console.warn("layer", L, e); }
@@ -714,20 +931,37 @@ const APP = {
   state: null, screen: "templates", logos: {}, sample: null, localPhoto: null,
   tpl: null, dirty: false, surface: "feed", fmt: "4:5", sel: null,
   fields: null, boxes: {}, drag: null, guides: null, raf: 0,
+  mode: null,          // simple — готовые стили и главные настройки; designer — слои, зоны, импорт
+  slide: 1,            // какой кадр карусели показывать: 1 — обложка, 2 — следующий
+  safe: false, notes: new Set(),
 };
 const root = () => document.getElementById("app");
 
-function env(dark) {
-  return { palette: APP.state.brand.palette, logos: APP.logos, fields: APP.fields, dark: dark || 0, images: IMG_STATE.map };
+function env(dark, slide) {
+  const fields = { ...APP.fields, i: slide || APP.slide || 1, n: 8 };
+  return { palette: APP.state.brand.palette, logos: APP.logos, fields, dark: dark || 0, images: IMG_STATE.map,
+           notes: new Set(), focus: null };
+}
+function setMode(m) {
+  APP.mode = m === "designer" ? "designer" : "simple";
+  try { localStorage.setItem("nb_mode", APP.mode); } catch (e) {}
 }
 function photoFor() { return APP.localPhoto || APP.sample; }
 
 async function loadState() {
   const st = await (await api("GET", "state")).json();
   APP.state = st;
+  BID = String(st.brand.id);
   LANG = st.lang === "en" ? "en" : "ru";
   document.documentElement.lang = LANG;
-  if (!APP.fields) APP.fields = { title: t("previewTitle"), subtitle: t("previewSub"), hashtag: (st.brand.hashtags[0] || "#hashtag"), i: 1, n: 8 };
+  if (!APP.mode) {
+    let saved = null;
+    try { saved = localStorage.getItem("nb_mode"); } catch (e) {}
+    APP.mode = saved === "designer" || saved === "simple" ? saved : (st.role === "designer" ? "designer" : "simple");
+  }
+  // превью — на настоящих заголовках клиента, если они уже были
+  if (!APP.fields) APP.fields = { title: (st.recent_titles || [])[0] || t("previewTitle"), subtitle: t("previewSub"),
+                                  hashtag: (st.brand.hashtags[0] || "#hashtag") };
   await loadAssets();
 }
 async function loadAssets() {
@@ -779,7 +1013,7 @@ function thumb(spec, w) {
   const layers = spec.feed.layers;
   Promise.all([...fontsOf(layers).map(ensureFont), ...imagesOf(layers).map(ensureImage)]).then(() => {
     const big = document.createElement("canvas");
-    renderSurface(big, 540, 675, photoFor(), layers, env());
+    renderSurface(big, 540, 675, photoFor(), layers, env(0, 1));
     c.width = Math.round(W * scale * 2); c.height = Math.round(H * scale * 2);
     c.getContext("2d").drawImage(big, 0, 0, c.width, c.height);
   });
@@ -796,9 +1030,15 @@ function renderTemplates(r) {
   }
   r.append(sec);
   if (list.length < APP.state.max_templates)
-    r.append(h("div", { style: "padding: 0 12px; display: grid; gap: 8px" },
-      h("button", { class: "btn primary block", onclick: presetSheet }, t("newTpl")),
-      h("button", { class: "btn block", style: "background: var(--bg)", onclick: () => importSheet("new") }, t("importBtn"))));
+    r.append(h("div", { style: "padding: 0 12px" }, h("button", { class: "btn primary block", onclick: presetSheet }, t("newTpl"))));
+  r.append(modeSection(() => go("templates")));
+}
+function modeSection(after) {
+  return h("div", { class: "section" },
+    h("div", { class: "row" }, h("label", {}, t("modeDesigner")),
+      h("div", { class: "ctl", style: "justify-content:flex-end" },
+        sw(APP.mode === "designer", v => { setMode(v ? "designer" : "simple"); APP.sel = null; after && after(); }))),
+    h("p", { class: "hint", style: "margin-top:0" }, t("modeHintDesigner")));
 }
 function importSheet(target, tid) {
   const body = h("div", {});
@@ -868,14 +1108,21 @@ function sheet(title, body) {
   return bg;
 }
 function presetSheet() {
+  const body = h("div", {});
   const grid = h("div", { class: "grid" });
-  const bg = sheet(t("chooseStart"), grid);
+  const bg = sheet(t("chooseStart"), body);
+  if (APP.mode === "designer")
+    body.append(h("div", { class: "list", style: "margin-bottom:12px" },
+      h("button", { onclick: () => { bg.remove(); importSheet("new"); } }, t("fromLayout"))));
+  body.append(grid);
   for (const p of APP.state.presets) {
+    if (p.designer && APP.mode !== "designer") continue;        // «С нуля» — только в режиме дизайнера
     grid.append(h("button", {
+      title: p.designer ? t("blankHint") : null,
       onclick: async () => {
         bg.remove();
         try {
-          const created = await (await api("POST", "templates", { name: p.name, spec: p.spec })).json();
+          const created = await (await api("POST", "templates", { name: p.name, spec: p.spec, from: p.key })).json();
           APP.state.templates.push(created);
           openEditor(created);
         } catch (e) { toast(errText(e)); }
@@ -887,12 +1134,20 @@ function presetSheet() {
 /* ============================================================
    БРЕНД
    ============================================================ */
-let kitTimer = 0;
-function saveKit(patch) {
+let kitTimer = 0, kitPatch = {};
+function saveKit(patch, after) {
   Object.assign(APP.state.brand, patch);
+  Object.assign(kitPatch, patch);          // правки за полсекунды уходят одним запросом, ни одна не теряется
   clearTimeout(kitTimer);
   kitTimer = setTimeout(async () => {
-    try { await api("PUT", "kit", patch); toast(t("saved")); } catch (e) { toast(errText(e)); }
+    const send = kitPatch;
+    kitPatch = {};
+    try {
+      const res = await (await api("PUT", "kit", send)).json();
+      if (res.brand) Object.assign(APP.state.brand, res.brand);
+      toast(t("saved"));
+      after && after();
+    } catch (e) { toast(errText(e)); }
   }, 500);
 }
 function pickFile(accept, cb) {
@@ -907,10 +1162,69 @@ async function upload(kind, file) {
   try {
     const res = await (await api("POST", `upload/${kind}`, fd, true)).json();
     if (res.bg_removed) toast(t("bgRemoved")); else toast(t("saved"));
-    await loadState();
     FONT_STATE.loaded.delete(kind);
+    await loadState();
+    if (res.missing != null) APP.state.font_missing = { ...(APP.state.font_missing || {}), [kind]: res.missing };
     haptic("success");
+    return res;
   } catch (e) { toast(errText(e)); haptic("error"); }
+}
+// Логотип почти чёрный? Тогда на тёмном фото его перекрасит в светлый режим «Контраст»
+function logoIsDark(img) {
+  if (img._dark != null) return img._dark;
+  try {
+    const c = document.createElement("canvas");
+    c.width = 64; c.height = Math.max(1, Math.round(64 * img.naturalHeight / img.naturalWidth));
+    const x = c.getContext("2d");
+    x.drawImage(img, 0, 0, c.width, c.height);
+    const d = x.getImageData(0, 0, c.width, c.height).data;
+    let sum = 0, n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 128) { sum += luma(d[i], d[i + 1], d[i + 2]); n++; }
+    img._dark = n > 0 && sum / n < 90;
+  } catch (e) { img._dark = false; }
+  return img._dark;
+}
+function paletteEditor(after) {
+  const B = APP.state.brand;
+  const roles = APP.state.palette_roles || [];
+  const wrap = h("div", { class: "stack" });
+  const pal = h("div", { class: "palette" });
+  B.palette.forEach((c, i) => {
+    const inp = h("input", { type: "color", value: c.toLowerCase(), "aria-label": roles[i] || `${t("palette")} ${i + 1}` });
+    const swatch = h("div", { class: "sw", style: `background:${c}` }, inp);
+    inp.addEventListener("input", () => { swatch.style.background = inp.value; });
+    inp.addEventListener("change", () => {
+      const p = [...APP.state.brand.palette]; p[i] = inp.value.toUpperCase();
+      saveKit({ palette: p }); TINT_CACHE.clear(); schedule();
+    });
+    pal.append(h("div", { class: "pal" }, swatch, roles[i] || ""));
+  });
+  wrap.append(pal);
+  if (APP.state.assets.logo) {
+    const found = h("div", { class: "chipsrow" });
+    const btn = h("button", { class: "btn ghost", onclick: async () => {
+      btn.disabled = true;
+      try {
+        const { colors } = await (await api("GET", "logo/colors")).json();
+        found.innerHTML = "";
+        if (!colors.length) found.append(h("span", { class: "hint" }, t("fromLogoNone")));
+        else {
+          found.append(h("span", { class: "hint", style: "flex-basis:100%" }, t("fromLogoPick")));
+          for (const c of colors) found.append(h("button", { class: "sw", style: `background:${c}`, "aria-label": c, title: c,
+            onclick: () => { const p = [...APP.state.brand.palette]; p[2] = c.toUpperCase(); saveKit({ palette: p }); TINT_CACHE.clear(); schedule(); after && after(); } }));
+        }
+      } catch (e) { toast(errText(e)); }
+      btn.disabled = false;
+    } }, t("fromLogo"));
+    wrap.append(h("div", {}, btn), found);
+  }
+  return wrap;
+}
+// «В шрифте нет кириллицы и знаков ₽ № — их нарисует Inter»
+function fontWarning(cyr, signs) {
+  const list = signs.join(" ");
+  if (cyr) return signs.length ? t("fontNoCyrSigns").replace("{list}", list) : t("fontNoCyr");
+  return t("fontMissing").replace("{list}", list);
 }
 function renderBrand(r) {
   const B = APP.state.brand;
@@ -923,8 +1237,12 @@ function renderBrand(r) {
   const s2 = h("div", { class: "section" }, h("h3", {}, t("logo")));
   for (const [k, label] of [["logo", t("logo")], ["logo_alt", t("logoAlt")]]) {
     const img = APP.logos[k];
+    // логотип сразу на светлом и на тёмном — видно, нужен ли второй вариант
     s2.append(h("div", { class: "row asset" },
-      h("div", { class: "thumb" }, img ? h("img", { src: img.src, alt: label }) : null),
+      h("div", { class: "logo-pair" },
+        h("div", { class: "thumb light", title: t("onLight") }, img ? h("img", { src: img.src, alt: label + " — " + t("onLight") }) : null),
+        h("div", { class: "thumb dark", title: t("onDark") }, img ? h("img", { src: img.src, alt: label + " — " + t("onDark"),
+          style: logoIsDark(img) ? "filter: brightness(0) invert(1)" : null }) : null)),
       h("div", { style: "flex:1;min-width:0" }, label),
       img && k === "logo_alt" ? h("button", { class: "btn danger", onclick: async () => { await api("DELETE", `asset/${k}`); await loadState(); go("brand"); } }, t("remove")) : null,
       h("button", { class: "btn ghost", onclick: () => pickFile("image/*", async f => { await upload(k, f); go("brand"); }) }, img ? t("replace") : t("upload"))));
@@ -933,23 +1251,21 @@ function renderBrand(r) {
   r.append(s2);
 
   const s3 = h("div", { class: "section" }, h("h3", {}, t("palette")));
-  const pal = h("div", { class: "palette" });
-  B.palette.forEach((c, i) => {
-    const inp = h("input", { type: "color", value: c.toLowerCase(), "aria-label": `${t("palette")} ${i + 1}` });
-    inp.addEventListener("input", () => { sw.style.background = inp.value; });
-    inp.addEventListener("change", () => { const p = [...APP.state.brand.palette]; p[i] = inp.value.toUpperCase(); saveKit({ palette: p }); });
-    const sw = h("div", { class: "sw", style: `background:${c}` }, inp);
-    pal.append(sw);
-  });
-  s3.append(h("div", { class: "row" }, pal), h("p", { class: "hint" }, t("paletteHint")));
+  s3.append(h("div", { class: "row" }, paletteEditor(() => go("brand"))), h("p", { class: "hint" }, t("paletteHint")));
   r.append(s3);
 
   const s4 = h("div", { class: "section" }, h("h3", {}, t("fonts")));
   const slots = ["font1", "font2", "font3"];
   for (const slot of slots.filter(x => B.custom_fonts[x])) {
-    s4.append(h("div", { class: "row" },
-      h("div", { style: `flex:1;font-family:"nb-${slot}",inherit` }, B.custom_fonts[slot]),
-      h("button", { class: "btn danger", onclick: async () => { await api("DELETE", `asset/${slot}`); await loadState(); go("brand"); } }, t("remove"))));
+    const miss = ((APP.state.font_missing || {})[slot] || "").replace(/\s/g, "");
+    const shown = [...new Set([...miss])].filter(ch => "₽№«»—–…".includes(ch) || /[А-ЯЁа-яё]/.test(ch));
+    const cyr = [...miss].some(ch => /[А-ЯЁа-яё]/.test(ch));
+    s4.append(h("div", { class: "row stacked" },
+      h("div", { style: "display:flex;align-items:center;gap:8px;width:100%" },
+        h("div", { style: "flex:1;min-width:0" }, B.custom_fonts[slot]),
+        h("button", { class: "btn danger", onclick: async () => { await api("DELETE", `asset/${slot}`); await loadState(); go("brand"); } }, t("remove"))),
+      h("div", { class: "sample-line", style: `font-family:"nb-${slot}","nb-inter",sans-serif` }, t("fontSample")),
+      shown.length ? h("div", { class: "warn" }, fontWarning(cyr, shown.filter(ch => !/[А-ЯЁа-яё]/.test(ch)))) : null));
     ensureFont(slot);
   }
   const free = slots.find(x => !B.custom_fonts[x]);
@@ -1020,7 +1336,7 @@ function updateUndoUI() {
 }
 function openEditor(tp) {
   APP.tpl = clone(tp);
-  APP.mode = APP.mode || "style";
+  APP.slide = 1;
   histReset();
   APP.dirty = false;
   APP.surface = "feed";
@@ -1053,13 +1369,29 @@ function draw() {
   const needImg = imagesOf(L).filter(a => !IMG_STATE.map.has(a));
   if (needImg.length) { Promise.all(needImg.map(ensureImage)).then(schedule); }
   const [W, H] = dims();
-  APP.boxes = renderSurface(cv, W, H, photoFor(), L, env());
+  const e = env();
+  APP.boxes = renderSurface(cv, W, H, photoFor(), L, e);
+  APP.notes = e.notes;
+  const note = document.getElementById("note");
+  if (note) {
+    const msg = e.notes.has("title_cut") ? t("noteCut") : e.notes.has("title_small") ? t("noteSmall") : "";
+    note.textContent = msg;
+    note.classList.toggle("hidden", !msg);
+  }
   const ctx = cv.getContext("2d");
   const lw = Math.max(2, W / 360);
+  if (APP.safe && APP.mode === "designer") drawSafe(ctx, W, H, lw);
   if (APP.guides) {
+    const M = ((APP.state.safe && APP.state.safe.margin) || 0.06) * W;
+    const line = (x0, y0, x1, y1) => { ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke(); };
     ctx.save(); ctx.strokeStyle = "#ff3bd4"; ctx.lineWidth = lw;
-    if (APP.guides.v) { ctx.beginPath(); ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H); ctx.stroke(); }
-    if (APP.guides.h) { ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke(); }
+    if (APP.guides.v) line(W / 2, 0, W / 2, H);
+    if (APP.guides.h) line(0, H / 2, W, H / 2);
+    if (APP.guides.ml) line(M, 0, M, H);
+    if (APP.guides.mr) line(W - M, 0, W - M, H);
+    if (APP.guides.mt) line(0, M, W, M);
+    if (APP.guides.mb) line(0, H - M, W, H - M);
+    if (APP.guides.st) line(0, APP.guides.st, W, APP.guides.st);
     ctx.restore();
   }
   const b = APP.sel && APP.boxes[APP.sel];
@@ -1074,6 +1406,29 @@ function draw() {
   }
   fitStage();
 }
+// Безопасные зоны: в сторис верх 14% и низ 35% закрывают кнопки и подпись; в ленте пунктир — обрез
+// в сетке профиля 3:4, тонкие линии — поля бренда (6% от края)
+function drawSafe(ctx, W, H, lw) {
+  const M = ((APP.state.safe && APP.state.safe.margin) || 0.06) * W;
+  ctx.save();
+  if (APP.surface === "story") {
+    ctx.fillStyle = "rgba(255, 59, 212, 0.16)";
+    ctx.fillRect(0, 0, W, H * 0.14);
+    ctx.fillRect(0, H * 0.65, W, H * 0.35);
+  } else {
+    const gw = H * 3 / 4;                      // ширина кадра, которую видно в сетке профиля
+    if (gw < W - 1) {
+      ctx.setLineDash([lw * 5, lw * 4]);
+      ctx.strokeStyle = "rgba(255, 59, 212, 0.9)"; ctx.lineWidth = lw;
+      const x0 = (W - gw) / 2;
+      ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0, H); ctx.moveTo(W - x0, 0); ctx.lineTo(W - x0, H); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  ctx.strokeStyle = "rgba(255, 59, 212, 0.55)"; ctx.lineWidth = Math.max(1, lw / 2);
+  ctx.strokeRect(M, M, W - 2 * M, H - 2 * M);
+  ctx.restore();
+}
 const DESKTOP = window.matchMedia("(min-width: 900px)");
 function fitStage() {
   const cv = document.getElementById("stage");
@@ -1085,8 +1440,8 @@ function fitStage() {
     maxH = window.innerHeight - 150;
     maxW = (col ? col.clientWidth : window.innerWidth - 460) - 80;
   } else {
-    const drawer = APP.mode === "layers" && APP.sel;
-    maxH = Math.max(200, window.innerHeight * (drawer ? 0.36 : 0.46));
+    const drawer = APP.mode === "designer" && APP.sel;
+    maxH = Math.max(190, window.innerHeight * (drawer ? 0.32 : 0.4));
     maxW = Math.min(window.innerWidth - 56, 520);
   }
   const k = Math.min(maxW / W, maxH / H);
@@ -1125,28 +1480,37 @@ function renderEditor(r) {
   setBack(leaveEditor);
   r.classList.add("editor");
   const spec = APP.tpl.spec;
+  const designer = APP.mode === "designer";
   // --- сцена (слева на компьютере, сверху на телефоне) ---
   const cv = h("canvas", { id: "stage", "aria-label": APP.tpl.name, tabindex: "0" });
-  const fileBtn = h("button", { class: "chip", onclick: () => pickFile("image/*", async f => { APP.localPhoto = await blobImage(f); schedule(); }) }, t("ownPhoto"));
+  const fileBtn = h("button", { class: "chip", onclick: () => pickFile("image/*", async f => { APP.localPhoto = await blobImage(f); schedule(); buildLooks(); }) }, t("ownPhoto"));
   const fmts = APP.surface === "story" ? [] : Object.keys(FEED_SIZES).filter(k => !(k === "9:16" && spec.story.enabled));
+  // обложка и следующий кадр карусели выглядят по-разному, если у слоёв есть правило кадров или счётчик
+  const slides = [...spec.feed.layers, ...spec.story.layers].some(L => L.slides || (L.type === "text" && L.source === "counter"));
+  if (!slides) APP.slide = 1;
+  const chips = fmts.map(f => h("button", { class: "chip", "aria-pressed": String(APP.fmt === f), onclick: () => { APP.fmt = f; go("editor"); } }, f));
+  if (slides) chips.push(...[[1, t("cover")], [2, t("slide2")]].map(([i, l]) =>
+    h("button", { class: "chip", "aria-pressed": String(APP.slide === i), onclick: () => { APP.slide = i; go("editor"); } }, l)));
+  chips.push(fileBtn);
+  if (designer) chips.push(h("button", { class: "chip", "aria-pressed": String(APP.safe), onclick: () => { APP.safe = !APP.safe; go("editor"); } }, t("safeZones")));
   const stage = h("div", { class: "stage" },
     h("div", { class: "stagebar" },
       h("div", { class: "seg", role: "group" },
         ...["feed", "story"].map(s_ => h("button", { "aria-pressed": String(APP.surface === s_), onclick: () => { APP.surface = s_; APP.sel = null; go("editor"); } }, t(s_)))),
-      h("button", { class: "icon big", id: "undo", title: t("undo"), "aria-label": t("undo"), onclick: undo }, "↶"),
-      h("button", { class: "icon big", id: "redo", title: t("redo"), "aria-label": t("redo"), onclick: redo }, "↷")),
+      h("button", { class: "chip", id: "undo", onclick: undo }, t("undo")),
+      h("button", { class: "chip", id: "redo", onclick: redo }, t("redo"))),
     h("div", { class: "frame" }, h("i"), h("i"), h("i"), h("i"), cv),
-    h("div", { class: "stagebar chips" },
-      ...fmts.map(f => h("button", { class: "chip", "aria-pressed": String(APP.fmt === f), onclick: () => { APP.fmt = f; go("editor"); } }, f)),
-      fileBtn));
+    h("p", { class: "note hidden", id: "note", role: "status" }),
+    designer && APP.safe ? h("p", { class: "hint", style: "margin:0;max-width:520px" }, APP.surface === "story" ? t("safeHintStory") : t("safeHintFeed")) : null,
+    h("div", { class: "stagebar chips" }, ...chips));
   const side = h("div", { class: "col-side" });
   r.append(h("div", { class: "col-stage" }, stage), side);
   bindDrag(cv);
 
   if (!IN_TG) side.append(h("div", { class: "modes" }, h("button", { class: "btn ghost", onclick: leaveEditor }, t("back"))));
   side.append(h("div", { class: "modes" }, h("div", { class: "seg", role: "group" },
-    ...[["style", t("modeStyle")], ["layers", t("modeLayers")]].map(([m, l]) =>
-      h("button", { "aria-pressed": String(APP.mode === m), onclick: () => { if (APP.mode !== m) APP.sel = null; APP.mode = m; go("editor"); } }, l)))));
+    ...[["simple", t("modeSimple")], ["designer", t("modeDesigner")]].map(([m, l]) =>
+      h("button", { "aria-pressed": String(APP.mode === m), onclick: () => { if (APP.mode !== m) APP.sel = null; setMode(m); go("editor"); } }, l)))));
 
   const nameIn = h("input", { type: "text", value: APP.tpl.name, maxlength: 40, "aria-label": t("tplName") });
   nameIn.addEventListener("input", () => { APP.tpl.name = nameIn.value.slice(0, 40) || "—"; markDirty(); });
@@ -1160,7 +1524,7 @@ function renderEditor(r) {
         if (!spec.story.layers.length) spec.story.layers = clone(spec.feed.layers).map(L => ({ ...L, id: uid() }));
         markDirty(); go("editor");
       } }, t("storyEnable"))),
-      h("div", { class: "row" }, h("button", { class: "btn ghost", onclick: () => importSheet("story", APP.tpl.id) }, t("importStory")))));
+      designer ? h("div", { class: "row" }, h("button", { class: "btn ghost", onclick: () => importSheet("story", APP.tpl.id) }, t("importStory"))) : null));
     tail(side);
     requestAnimationFrame(draw);
     return;
@@ -1169,7 +1533,9 @@ function renderEditor(r) {
     side.append(h("div", { class: "section" }, h("div", { class: "row" }, h("label", {}, t("storyOn")),
       h("div", { class: "ctl", style: "justify-content:flex-end" }, sw(spec.story.enabled, v => { spec.story.enabled = v; markDirty(); go("editor"); })))));
   }
-  if (APP.mode === "style") {
+  if (!designer) {
+    side.append(h("div", { class: "section", id: "looks" }));
+    buildLooks();
     side.append(h("div", { id: "simple" }));
     renderSimple();
   } else {
@@ -1182,6 +1548,29 @@ function renderEditor(r) {
   tail(side);
   updateUndoUI();
   requestAnimationFrame(draw);
+}
+/* ---------- готовые стили: примерить на своём фото ---------- */
+function buildLooks() {
+  const box = document.getElementById("looks");
+  if (!box) return;
+  box.innerHTML = "";
+  box.append(h("h3", {}, t("looks")));
+  const grid = h("div", { class: "looks" });
+  for (const p of APP.state.presets) {
+    if (p.designer || !p.spec.feed.layers.length) continue;
+    grid.append(h("button", { onclick: () => applyLook(p) }, thumb(p.spec, 180), p.name));
+  }
+  box.append(grid, h("p", { class: "hint", style: "margin-top:0" }, t("looksHint")));
+}
+function applyLook(p) {
+  const key = APP.surface === "story" ? "story" : "feed";
+  let src = p.spec[key].layers;
+  if (key === "story" && !src.length) src = p.spec.feed.layers;
+  APP.tpl.spec[key].layers = clone(src).map(L => ({ ...L, id: uid() }));
+  APP.sel = null;
+  markDirty();
+  renderSimple();
+  toast(p.name);
 }
 function tail(r) {
   r.append(h("div", { class: "section" },
@@ -1219,17 +1608,19 @@ function renderLayerList() {
     const idx = L.indexOf(layer);
     box.append(h("div", { class: "layer" + (layer.id === APP.sel ? " sel" : "") + (layer.hidden ? " off" : "") },
       h("div", { class: "glyph", "aria-hidden": "true" }, GLYPH[layer.type] || "?"),
-      h("button", { class: "name", onclick: () => select(layer.id) }, layerTitle(layer)),
+      h("button", { class: "name", onclick: () => select(layer.id) }, layerTitle(layer),
+        layer.slides ? h("span", { class: "hint" }, " · " + t(layer.slides === "first" ? "slidesFirst" : "slidesRest")) : null),
       h("button", { class: "icon", title: t("up"), "aria-label": t("up"), disabled: idx === L.length - 1 ? true : null, onclick: () => move(idx, 1) }, "↑"),
       h("button", { class: "icon", title: t("down"), "aria-label": t("down"), disabled: idx === 0 ? true : null, onclick: () => move(idx, -1) }, "↓"),
-      h("button", { class: "icon", title: layer.hidden ? t("show") : t("hide"), "aria-label": layer.hidden ? t("show") : t("hide"),
-        onclick: () => { layer.hidden = !layer.hidden; if (!layer.hidden) delete layer.hidden; markDirty(); renderLayerList(); } }, layer.hidden ? "○" : "●")));
+      h("button", { class: "tbtn", title: layer.hidden ? t("show") : t("hide"), "aria-label": layer.hidden ? t("show") : t("hide"),
+        onclick: () => { layer.hidden = !layer.hidden; if (!layer.hidden) delete layer.hidden; markDirty(); renderLayerList(); } },
+        layer.hidden ? t("hiddenL") : t("visible"))));
   });
   box.append(h("div", { class: "row" }, h("button", { class: "btn ghost", onclick: addLayerSheet }, "+ " + t("addLayer"))));
 }
 function select(id) {
   APP.sel = id;
-  if (APP.mode === "layers") renderLayerList();
+  if (APP.mode === "designer") renderLayerList();
   renderProps();
   schedule();
   fitStage();
@@ -1383,6 +1774,28 @@ function pointGrid(label, value, onPick) {
   return row(label, grid);
 }
 function card(title, ...kids) { return h("div", { class: "section" }, h("h3", {}, title), ...kids); }
+// Пары шрифтов: заголовок + рубрика/счётчик. Все — с кириллицей.
+const PAIRS = [
+  ["onest", 600, "onest", 600, "Onest"],
+  ["golos", 700, "jetbrains", 500, "Golos + JetBrains Mono"],
+  ["manrope", 700, "manrope", 600, "Manrope"],
+  ["montserrat", 700, "montserrat", 600, "Montserrat"],
+  ["geologica", 600, "geologica", 500, "Geologica"],
+  ["unbounded", 500, "inter", 600, "Unbounded + Inter"],
+  ["oswald", 500, "inter", 600, "Oswald + Inter"],
+  ["playfair", 600, "inter", 600, "Playfair + Inter"],
+  ["cormorant", 600, "manrope", 600, "Cormorant + Manrope"],
+  ["lora", 600, "inter", 500, "Lora + Inter"],
+];
+const clampW = (key, w) => { const fi = fontInfo(key); return Math.min(fi.max, Math.max(fi.min, w)); };
+function applyPair(Ls, titleKey, titleW, tagKey, tagW) {
+  for (const L of Ls) {
+    if (L.type !== "text") continue;
+    if (L.source === "title") { L.font = titleKey; L.weight = clampW(titleKey, titleW); }
+    else if (L.source === "subtitle") { L.font = tagKey; L.weight = clampW(tagKey, 400); }
+    else { L.font = tagKey; L.weight = clampW(tagKey, tagW); }
+  }
+}
 function renderSimple() {
   const box = document.getElementById("simple");
   if (!box) return;
@@ -1390,85 +1803,102 @@ function renderSimple() {
   const Ls = layers();
   const f = mostUsedFont();
   const redraw = () => { markDirty(); renderSimple(); };
+  const M = (APP.state.safe && APP.state.safe.margin) || 0.06;
 
   // Логотип
   const lg = Ls.find(L => L.type === "logo");
   if (!lg) box.append(card(t("logo"), h("div", { class: "row" }, h("button", { class: "btn ghost", onclick: () => {
-    Ls.push({ type: "logo", asset: "logo", anchor: "bl", x: 0.05, y: 0.05, w: 0.09, color: { ...CT }, opacity: 1, id: uid() }); redraw();
+    Ls.push({ type: "logo", asset: "logo", anchor: "tl", x: M, y: M, w: 0.14, color: { ...CT }, opacity: 1, id: uid() }); redraw();
   } }, "+ " + t("addLogo")))));
   else box.append(card(t("logo"),
-    pointGrid(t("where"), lg.anchor, a => { lg.anchor = a; lg.x = a[1] === "c" ? 0 : 0.05; lg.y = a[0] === "m" ? 0 : 0.05; }),
-    seg(t("width"), [[0.06, "S"], [0.09, "M"], [0.13, "L"]], () => nearest(lg.w, [0.06, 0.09, 0.13]), v => lg.w = v),
+    pointGrid(t("where"), lg.anchor, a => { lg.anchor = a; lg.x = a[1] === "c" ? 0 : M; lg.y = a[0] === "m" ? 0 : M; }),
+    seg(t("width"), [[0.1, "S"], [0.14, "M"], [0.19, "L"]], () => nearest(lg.w, [0.1, 0.14, 0.19]), v => lg.w = v),
     colorCtl(t("color"), () => lg.color, c => { lg.color = c; markDirty(); }, { original: true })));
 
-  // Заголовок
+  // Заголовок: шрифты парой, кегль, положение
   const ti = Ls.find(L => L.type === "text" && L.source === "title");
   if (!ti) box.append(card(t("srcTitle"), h("div", { class: "row" }, h("button", { class: "btn ghost", onclick: () => {
-    Ls.push({ type: "text", source: "title", anchor: "bl", x: 0.06, y: 0.08, font: f, weight: 700, size: 0.06, tracking: 0, leading: 1.05,
-              case: "none", align: "left", maxw: 0.85, color: { ...CT }, opacity: 1, id: uid() }); redraw();
+    Ls.push({ type: "text", source: "title", anchor: "bl", x: M, y: M, font: f, weight: 600, size: 0.066, tracking: -0.01, leading: 1.08,
+              case: "none", align: "left", maxw: 0.84, lines: 4, color: { ...CT }, opacity: 1, id: uid() }); redraw();
   } }, "+ " + t("addTitle")))));
   else {
-    const fs = h("select", { "aria-label": t("font") });
-    for (const fo of APP.state.fonts) fs.append(h("option", { value: fo.key, selected: fo.key === ti.font ? true : null }, fo.label));
+    const tag = Ls.find(L => L.type === "text" && L.source !== "title" && L.source !== "subtitle");
+    const cur = PAIRS.findIndex(p => p[0] === ti.font && (!tag || p[2] === tag.font));
+    const fs = h("select", { "aria-label": t("fontPair") });
+    if (cur < 0) fs.append(h("option", { value: "", selected: true }, t("pairOwn") + ": " + fontInfo(ti.font).label));
+    PAIRS.forEach((p, k) => fs.append(h("option", { value: "p" + k, selected: k === cur ? true : null }, p[4])));
+    for (const fo of APP.state.fonts.filter(x => x.custom))
+      fs.append(h("option", { value: "c:" + fo.key }, t("ownFont") + ": " + fo.label));
     fs.addEventListener("change", () => {
-      ti.font = fs.value; const fi = fontInfo(ti.font);
-      ti.weight = Math.min(fi.max, Math.max(fi.min, ti.weight)); markDirty();
+      if (fs.value.startsWith("p")) { const p = PAIRS[+fs.value.slice(1)]; applyPair(Ls, p[0], p[1], p[2], p[3]); }
+      else if (fs.value.startsWith("c:")) { ti.font = fs.value.slice(2); ti.weight = 400; }
+      redraw();
     });
-    const vOf = () => ti.anchor[0];
     box.append(card(t("srcTitle"),
-      row(t("font"), fs),
-      seg(t("size"), [[0.045, "S"], [0.06, "M"], [0.075, "L"], [0.095, "XL"]], () => nearest(ti.size, [0.045, 0.06, 0.075, 0.095]), v => ti.size = v),
-      seg(t("place"), [["t", t("top")], ["m", "≡"], ["b", t("bottom")]], vOf, v => {
-        ti.anchor = v + ti.anchor[1]; ti.y = v === "m" ? 0 : 0.08;
+      row(t("fontPair"), fs),
+      seg(t("size"), [[0.045, "S"], [0.058, "M"], [0.068, "L"], [0.085, "XL"]], () => nearest(ti.size, [0.045, 0.058, 0.068, 0.085]), v => ti.size = v),
+      seg(t("place"), [["t", t("top")], ["m", t("middle")], ["b", t("bottom")]], () => ti.anchor[0], v => {
+        ti.anchor = v + ti.anchor[1]; ti.y = v === "m" ? 0 : M;
       }),
-      seg(t("align"), [["left", t("left")], ["center", "⎯"], ["right", t("right")]], () => ti.align, v => {
+      seg(t("align"), [["left", t("left")], ["center", t("center")], ["right", t("right")]], () => ti.align, v => {
         ti.align = v; const hz = v === "left" ? "l" : v === "right" ? "r" : "c";
-        ti.anchor = ti.anchor[0] + hz; ti.x = hz === "c" ? 0 : 0.06; if (!ti.maxw) ti.maxw = 0.85;
+        ti.anchor = ti.anchor[0] + hz; ti.x = hz === "c" ? 0 : (ti.plate ? 0 : M); if (!ti.maxw) ti.maxw = 0.84;
       }),
       h("div", { class: "row" }, h("label", {}, t("plate")), h("div", { class: "ctl", style: "justify-content:flex-end" },
-        sw(!!ti.plate, v => { if (v) ti.plate = { color: { mode: "fixed", value: "p2" }, opacity: 1, radius: 0, padx: 0.8, pady: 0.55 }; else delete ti.plate; redraw(); }))),
+        sw(!!ti.plate, v => {
+          if (v) { ti.plate = { color: { mode: "fixed", value: "p2" }, opacity: 1, radius: 0, padx: 1.2, pady: 0.7 }; if (ti.anchor[1] === "l") ti.x = 0; }
+          else { delete ti.plate; if (ti.anchor[1] === "l") ti.x = M; }
+          redraw();
+        }))),
       colorCtl(t("color"), () => ti.color, c => { ti.color = c; markDirty(); })));
   }
 
-  // Хештег
+  // Рубрика (хештег)
   const tg_ = Ls.find(L => L.type === "text" && L.source === "hashtag");
-  const tagCard = card(t("srcHashtag"), h("div", { class: "row" }, h("label", {}, t("showTag")),
+  const tagCard = card(t("srcRubric"), h("div", { class: "row" }, h("label", {}, t("showTag")),
     h("div", { class: "ctl", style: "justify-content:flex-end" }, sw(tg_ && !tg_.hidden, v => {
-      if (!tg_) Ls.push({ type: "text", source: "hashtag", anchor: "tr", x: 0.05, y: 0.05, font: f, weight: 500, size: 0.026, tracking: 0,
-                          leading: 1.1, case: "none", align: "right", maxw: 0, color: { ...CT }, opacity: 1, id: uid() });
+      if (!tg_) Ls.push({ type: "text", source: "hashtag", anchor: "tr", x: M, y: M, font: f, weight: 600, size: 0.032, tracking: 0.08,
+                          leading: 1, case: "upper", align: "right", maxw: 0, lines: 1, color: { ...CT }, opacity: 1, id: uid() });
       else if (v) delete tg_.hidden; else tg_.hidden = true;
       redraw();
     }))));
   if (tg_ && !tg_.hidden) {
     tagCard.append(
-      seg(t("corner"), [["tl", "↖"], ["tr", "↗"], ["bl", "↙"], ["br", "↘"]], () => tg_.anchor, a => {
-        tg_.anchor = a; tg_.x = 0.05; tg_.y = 0.05; tg_.align = a[1] === "r" ? "right" : "left";
+      pointGrid(t("where"), tg_.anchor, a => {
+        tg_.anchor = a; tg_.x = a[1] === "c" ? 0 : M; tg_.y = a[0] === "m" ? 0 : M;
+        tg_.align = a[1] === "r" ? "right" : a[1] === "c" ? "center" : "left";
       }),
       seg(t("look"), [["plain", t("lookText")], ["plate", t("plate")]], () => tg_.plate ? "plate" : "plain", v => {
-        if (v === "plate") { tg_.plate = { color: { mode: "fixed", value: "p2" }, opacity: 1, radius: 0.5, padx: 0.75, pady: 0.55 }; tg_.color = { mode: "fixed", value: "p1" }; }
+        if (v === "plate") { tg_.plate = { color: { mode: "fixed", value: "p2" }, opacity: 1, radius: 0.5, padx: 0.75, pady: 0.55 }; tg_.color = { ...CT }; }
         else { delete tg_.plate; tg_.color = { ...CT }; }
       }));
   }
   box.append(tagCard);
 
-  // Затемнение
+  // Затемнение под текстом
   const sh = Ls.find(L => L.type === "gradient" || L.type === "overlay");
   const cur = !sh ? "none" : sh.type === "overlay" ? "all" : sh.side;
   const shCard = card(t("shade"), seg(null, [["none", t("shadeNone")], ["bottom", t("bottom")], ["top", t("top")], ["all", t("shadeAll")]], () => cur, v => {
     const i = Ls.indexOf(sh);
     if (i >= 0) Ls.splice(i, 1);
-    if (v === "all") Ls.unshift({ type: "overlay", color: { mode: "fixed", value: "p1" }, opacity: 0.3, id: uid() });
-    else if (v !== "none") Ls.unshift({ type: "gradient", side: v, extent: 0.5, color: { mode: "fixed", value: "p1" }, opacity: 0.75, adaptive: true, id: uid() });
+    const onCover = ti && ti.slides === "first" ? { slides: "first" } : {};
+    if (v === "all") Ls.unshift({ type: "overlay", color: { mode: "fixed", value: "p1" }, opacity: 0.3, ...onCover, id: uid() });
+    else if (v !== "none") Ls.unshift({ type: "gradient", side: v, extent: 0.6, color: { mode: "fixed", value: "p1" }, opacity: 0.85, adaptive: true, ...onCover, id: uid() });
     redraw();
   }));
   if (sh) shCard.append(slider(t("strength"), () => sh.opacity, v => sh.opacity = v, 0, sh.type === "overlay" ? 0.9 : 1, 0.01, pct));
   box.append(shCard);
 
+  // Цвета бренда — общие для всех шаблонов
+  box.append(card(t("brandColors"), h("div", { class: "row" }, paletteEditor(() => { renderSimple(); buildLooks(); })),
+    h("p", { class: "hint", style: "margin-top:0" }, t("brandColorsHint"))));
+
   box.append(h("div", { style: "padding: 0 12px" }, h("button", { class: "btn block", style: "background: var(--bg)",
-    onclick: () => { APP.mode = "layers"; APP.sel = null; go("editor"); } }, t("fine"))));
+    onclick: () => { setMode("designer"); APP.sel = null; go("editor"); } }, t("toDesigner")),
+    h("p", { class: "hint", style: "text-align:center" }, t("modeHintDesigner"))));
 }
 function renderProps() {
-  if (APP.mode === "style") return renderSimple();
+  if (APP.mode !== "designer") return renderSimple();
   return renderLayerProps();
 }
 function renderLayerProps() {
@@ -1490,8 +1920,16 @@ function renderLayerProps() {
     add(colorCtl(t("color"), () => L.color, c => { L.color = c; markDirty(); }, { original: true }));
     add(slider(t("opacity"), () => L.opacity, v => L.opacity = v, 0, 1, 0.01, pct));
   } else if (L.type === "text") {
-    add(seg(t("source"), [["title", t("srcTitle")], ["subtitle", t("srcSubtitle")], ["hashtag", "#"], ["counter", "1/n"], ["static", "Aa"]],
-      () => L.source, v => { L.source = v; if (v === "counter" && !L.text) L.text = "{i} / {n}"; renderLayerList(); }, true));
+    const src = h("select", { "aria-label": t("source") });
+    for (const [v, l] of [["title", t("srcTitle")], ["subtitle", t("srcSubtitle")], ["hashtag", t("srcRubric")],
+                          ["counter", t("srcCounter")], ["static", t("srcLabel")]])
+      src.append(h("option", { value: v, selected: v === L.source ? true : null }, l));
+    src.addEventListener("change", () => {
+      L.source = src.value;
+      if (L.source === "counter" && !L.text) L.text = "{i} / {n}";
+      markDirty(); renderLayerList(); renderProps();
+    });
+    add(row(t("source"), src));
     if (L.source === "static" || L.source === "counter") {
       const ta = h("textarea", { "aria-label": t("text"), rows: L.source === "static" ? 2 : 1 });
       ta.value = L.text || "";
@@ -1513,13 +1951,26 @@ function renderLayerProps() {
     add(slider(t("tracking"), () => L.tracking, v => L.tracking = v, -0.1, 0.5, 0.005, v => `${Math.round(v * 1000) / 10}%`));
     add(slider(t("leading"), () => L.leading, v => L.leading = v, 0.7, 2, 0.01, v => `×${v.toFixed(2)}`));
     add(seg(t("caseL"), [["none", "Aa"], ["upper", "AA"], ["lower", "aa"]], () => L.case, v => L.case = v));
-    add(seg(t("align"), [["left", t("left")], ["center", "⎯"], ["right", t("right")]], () => L.align, v => L.align = v));
+    add(seg(t("align"), [["left", t("left")], ["center", t("center")], ["right", t("right")]], () => L.align, v => L.align = v));
     add(slider(t("maxw"), () => L.maxw, v => L.maxw = v, 0, 1, 0.01, v => v ? pct(v) : t("nowrap")));
+    // сколько строк максимум: длинный текст сначала уменьшится, потом обрежется многоточием
+    add(slider(t("lines"), () => maxLines(L), v => L.lines = Math.round(v), 0, 12, 1, v => v ? String(Math.round(v)) : t("linesNone")));
     add(...posCtls(L));
     add(colorCtl(t("color"), () => L.color, c => { L.color = c; markDirty(); }));
     add(slider(t("opacity"), () => L.opacity, v => L.opacity = v, 0, 1, 0.01, pct));
     add(h("div", { class: "row" }, h("label", {}, t("plate")), h("div", { class: "ctl", style: "justify-content:flex-end" },
       sw(!!L.plate, v => { L.plate = v ? { color: { mode: "fixed", value: "p1" }, opacity: 1, radius: 0.5, padx: 0.8, pady: 0.55 } : undefined; if (!v) delete L.plate; markDirty(); renderProps(); }))));
+    add(h("div", { class: "row" }, h("label", {}, t("shadow")), h("div", { class: "ctl", style: "justify-content:flex-end" },
+      sw(!!L.shadow, v => {
+        if (v) L.shadow = { blur: 0.35, opacity: 0.5, color: { mode: "fixed", value: "p1" } }; else delete L.shadow;
+        markDirty(); renderProps();
+      }))));
+    if (L.shadow) {
+      const S_ = L.shadow;
+      add(slider(t("shadowBlur"), () => S_.blur, v => S_.blur = v, 0.02, 1.5, 0.01, v => `${v.toFixed(2)} em`));
+      add(slider(t("shadowOpacity"), () => S_.opacity, v => S_.opacity = v, 0, 1, 0.01, pct));
+      add(colorCtl(t("shadowColor"), () => S_.color, c => { S_.color = c; markDirty(); }));
+    }
     if (L.plate) {
       const P = L.plate;
       add(colorCtl(t("plateColor"), () => P.color, c => { P.color = c; markDirty(); }));
@@ -1565,6 +2016,9 @@ function renderLayerProps() {
     }
     add(slider(t("opacity"), () => L.opacity, v => L.opacity = v, 0, 1, 0.01, pct));
   }
+  // в карусели: слой на всех кадрах, только на обложке или на всех, кроме обложки
+  add(seg(t("slidesRule"), [["all", t("slidesAll")], ["first", t("slidesFirst")], ["rest", t("slidesRest")]],
+    () => L.slides || "all", v => { if (v === "all") delete L.slides; else L.slides = v; renderLayerList(); go("editor"); }));
   add(h("div", { class: "row" },
     h("button", { class: "btn ghost", onclick: () => {
       const c = { ...clone(L), id: uid() };
@@ -1587,7 +2041,19 @@ function previewFields() {
     el.addEventListener("input", () => { APP.fields[key] = el.value; schedule(); });
     box.append(row(label, el));
   };
-  if (used.has("title")) add("title", t("srcTitle"), true);
+  if (used.has("title")) {
+    add("title", t("srcTitle"), true);
+    const recent = (APP.state.recent_titles || []).slice(0, 5);
+    if (recent.length) {
+      const chipsBox = h("div", { class: "chipsrow" }, h("span", { class: "hint", style: "flex-basis:100%" }, t("recent")));
+      for (const tt of recent) chipsBox.append(h("button", { class: "chip", onclick: () => {
+        APP.fields.title = tt;
+        const ta = box.querySelector("textarea"); if (ta) ta.value = tt;
+        schedule();
+      } }, tt.length > 34 ? tt.slice(0, 33) + "…" : tt));
+      box.append(chipsBox);
+    }
+  }
   if (used.has("subtitle")) add("subtitle", t("srcSubtitle"));
   if (used.has("hashtag")) {
     const tags = APP.state.brand.hashtags.length ? APP.state.brand.hashtags : ["#hashtag"];
@@ -1662,8 +2128,15 @@ function bindDrag(cv) {
     let nx = APP.drag.lx + (hz === "r" ? -dx : dx);
     let ny = APP.drag.ly + (v === "b" ? -dy : dy);
     APP.guides = {};
-    if (hz === "c" && Math.abs(nx) < 0.012) { nx = 0; APP.guides.v = true; }
-    if (v === "m" && Math.abs(ny) < 0.012) { ny = 0; APP.guides.h = true; }
+    const SN = 0.012, M = (APP.state.safe && APP.state.safe.margin) || 0.06;
+    if (hz === "c" && Math.abs(nx) < SN) { nx = 0; APP.guides.v = true; }
+    if (v === "m" && Math.abs(ny) < SN) { ny = 0; APP.guides.h = true; }
+    if (hz !== "c" && Math.abs(nx - M) < SN) { nx = M; APP.guides[hz === "l" ? "ml" : "mr"] = true; }
+    if (v !== "m" && Math.abs(ny - M) < SN) { ny = M; APP.guides[v === "t" ? "mt" : "mb"] = true; }
+    if (APP.surface === "story" && APP.state.safe && v !== "m") {      // край безопасной зоны сторис
+      const edge = v === "t" ? APP.state.safe.story_top : APP.state.safe.story_bottom;
+      if (Math.abs(ny - edge) < SN) { ny = edge; APP.guides.st = v === "t" ? edge * W : cv.height - edge * W; }
+    }
     L.x = Math.round(nx * 1000) / 1000;
     L.y = Math.round(ny * 1000) / 1000;
     markDirty();
@@ -1706,7 +2179,7 @@ document.addEventListener("keydown", e => {
   const L = selLayer();
   if (!L) return;
   if (e.key === "Escape") { APP.sel = null; renderLayerList(); renderProps(); schedule(); return; }
-  if ((e.key === "Delete" || e.key === "Backspace") && APP.mode === "layers") {
+  if ((e.key === "Delete" || e.key === "Backspace") && APP.mode === "designer") {
     e.preventDefault();
     const arr = layers(); arr.splice(arr.indexOf(L), 1); APP.sel = null; markDirty(); renderLayerList(); renderProps();
     return;
@@ -1731,7 +2204,7 @@ async function serverCheck() {
   sheet(t("check"), box);
   try {
     const blob = await (await api("POST", "preview", {
-      spec: APP.tpl.spec, surface: APP.surface, fmt: APP.fmt,
+      spec: APP.tpl.spec, surface: APP.surface, fmt: APP.fmt, i: APP.slide || 1, n: 8,
       fields: { title: APP.fields.title, subtitle: APP.fields.subtitle, hashtag: APP.fields.hashtag },
     })).blob();
     const img = await blobImage(blob);
@@ -1783,7 +2256,8 @@ window.addEventListener("resize", () => APP.screen === "editor" && fitStage());
     go("templates");
   } catch (e) {
     const b = document.getElementById("boot") || root();
-    b.textContent = errText(e);
+    b.innerHTML = "";
+    b.append(h("b", { style: "animation:none" }, "NUMBUS"), h("p", {}, errText(e)));
   }
 })();
 window.NB = { renderSurface, ensureFont, fontsOf, ensureImage, imagesOf, IMG_STATE, APP, importSheet };

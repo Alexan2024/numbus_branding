@@ -1,0 +1,6 @@
+# Домен из .env (DOMAIN=numbus.example.ru). Сертификат Let's Encrypt Caddy получит сам,
+# если A-запись домена указывает на этот сервер и порты 80/443 открыты.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy bot:8080
+}
