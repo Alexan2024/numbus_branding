@@ -36,6 +36,7 @@ from PIL import Image, ImageDraw, ImageFont
 import db
 import drafts
 import render as R
+import sample as SMP
 import spec as S
 import web
 import backups
@@ -70,7 +71,7 @@ esc = html.escape
 
 MENU, CODE, K_NAME, K_LOGO, K_COLOR, K_PHOTO, REQ = range(7)
 
-FORMATS = ["4:5", "3:4", "1:1", "3:2", "9:16", "orig"]
+FORMATS = ["4:5", "3:4", "1:1", "3:2", "16:9", "1.91:1", "9:16", "orig"]
 CODE_RE = r"(?i)^\s*NB-[A-Z0-9]{4}-[A-Z0-9]{4}\s*$"
 HEX_RE = re.compile(r"^#?([0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})$")
 
@@ -500,6 +501,8 @@ def menu_kb(ctx, b, brands, admin=False):
             rows.append([eb, Btn(tx(ctx, "b_desktop"), callback_data="menu:desktop")])
         elif not db.has_asset(b["id"], "logo"):
             rows.append([Btn(tx(ctx, "k_setup"), callback_data="menu:setup")])
+        if db.has_asset(b["id"], "logo"):
+            rows.append([Btn(tx(ctx, "b_sample"), callback_data="smp:start")])
     if can_add_brand(b):
         rows.append([Btn(tx(ctx, "b_add_brand"), callback_data="menu:addbrand")])
     row = []
@@ -1256,7 +1259,7 @@ async def on_wiz_photo(update, ctx):
         await say(update, tx(ctx, "photo_bad"), kind="notice")
         return K_PHOTO
     lang = ctx.user_data.get("lang", "ru")
-    title, subtitle, tag, tags, _ = parse_text(update.message.caption or "")
+    title, subtitle, tag, tags, _ = parse_text(marked(update.message.caption, update.message.caption_entities))
     wait = await say(update, tx(ctx, "styles_wait"), kind="keep")
     try:
         db.set_asset(bid, "sample", await run(web._prep_sample, data))
@@ -1336,6 +1339,37 @@ DRAFT_TTL = 180          # сек: фото без подписи в этот с
 REFRESH_DELAY = 1.2      # сек: ждём остальные фото альбома
 TAG_RE = re.compile(r"#[\w\-]+", re.U)
 TEXT_MAX = 300
+ZOOM_STEP, ZOOM_MAX = 0.25, 3.0
+
+
+def marked(text, entities):
+    """Жирный текст из Telegram → «*…*»: так выделение доходит до шаблона (стиль em слоя).
+    Смещения сущностей в Telegram — в единицах UTF-16."""
+    text = text or ""
+    ents = [e for e in (entities or []) if str(getattr(e, "type", "")) in ("bold", "MessageEntityType.BOLD")]
+    if not ents:
+        return text
+    u = text.encode("utf-16-le")
+    cuts = {}
+    for e in ents:
+        a, b = e.offset, e.offset + e.length
+        while b > a and u[2 * (b - 1):2 * b] in (b" \x00", b"\n\x00"):   # хвостовые пробелы — вне выделения
+            b -= 1
+        if b > a:
+            cuts[a] = cuts.get(a, "") + "*"
+            cuts[b] = "*" + cuts.get(b, "")
+    out, prev = [], 0
+    for k in sorted(cuts):
+        out.append(u[2 * prev:2 * k].decode("utf-16-le"))
+        out.append(cuts[k])
+        prev = k
+    out.append(u[2 * prev:].decode("utf-16-le"))
+    return "".join(out)
+
+
+def unmark(s):
+    """Текст поста для канала — без звёздочек разметки."""
+    return R.parse_marks(s or "")[0]
 
 
 def parse_text(text, fields=None):
@@ -1384,10 +1418,14 @@ def _focus(d, i):
     return tuple(f) if f else None
 
 
+def _zoom(d, i):
+    return float((d.get("zoom") or {}).get(str(i)) or 1.0)
+
+
 def _ctx_for(base, d, i, n, dark):
     return R.Ctx(base.palette, base.logos, base.customs,
                  dict(title=d.get("title", ""), subtitle=d.get("subtitle", ""), hashtag=d.get("tag") or "",
-                      i=i, n=n), dark, base.images, focus=_focus(d, i - 1))
+                      i=i, n=n), dark, base.images, focus=_focus(d, i - 1), zoom=_zoom(d, i - 1))
 
 
 def _render_job(path, spec, fmt, ctx, out_dir, stem):
@@ -1406,8 +1444,9 @@ def _preview_job(path, spec, fmt, ctx):
     photo = R.open_photo(drafts.read(path))
     W, H = R.feed_size(photo, fmt)
     img = R.render_surface(photo, W, H, spec["feed"]["layers"], ctx)
-    share = R.crop_share(photo.width, photo.height, W, H)
-    horiz = photo.width / photo.height > W / H
+    cw, ch = R.photo_box(spec["feed"]["layers"], W, H, int(ctx.fields.get("i") or 1))   # кадр или рамка фото
+    share = R.crop_share(photo.width, photo.height, cw, ch)
+    horiz = photo.width / photo.height > cw / ch
     return R.to_preview(img), sorted(ctx.notes), share, horiz
 
 
@@ -1417,7 +1456,7 @@ def fmt_label(ctx, fmt):
 
 def post_text(d):
     """Текст поста для копирования: заголовок, подзаголовок и хештеги — через типограф."""
-    parts = [typograf(d.get("title") or ""), typograf(d.get("subtitle") or "")]
+    parts = [unmark(typograf(d.get("title") or "")), unmark(typograf(d.get("subtitle") or ""))]
     tags = uniq([d.get("tag")] + list(d.get("tags") or []))
     parts.append(" ".join(tags))
     return "\n\n".join(p for p in parts if p)
@@ -1467,6 +1506,9 @@ def pult_kb(ctx, d, tp, share=0.0, horiz=False):
         keys = ("b_focus_l", "b_focus_c", "b_focus_r") if horiz else ("b_focus_t", "b_focus_c", "b_focus_b")
         rows.append([Btn(("✓ " if abs(v - val) < 0.01 else "") + tx(ctx, k), callback_data=f"q:fc:{val}")
                      for k, val in zip(keys, (0.0, 0.5, 1.0))])
+    z = _zoom(d, d.get("cur", 0))
+    rows.append([Btn("−" if z > 1 else "·", callback_data="q:zm:-"), Btn(tx(ctx, "b_zoom", z=f"{z:g}"), callback_data="q:noop"),
+                 Btn("+" if z < ZOOM_MAX else "·", callback_data="q:zm:+")])
     rows.append([Btn(tx(ctx, "b_q_text"), callback_data="q:text")])
     if d.get("sent"):
         rows.append([Btn(tx(ctx, "b_q_again", n=n), callback_data="q:send"),
@@ -1510,6 +1552,12 @@ def drop_photo(d, k):
         if i != k:
             focus[str(i if i < k else i - 1)] = v
     d["focus"] = focus
+    zoom = {}
+    for key, v in (d.get("zoom") or {}).items():
+        i = int(key)
+        if i != k:
+            zoom[str(i if i < k else i - 1)] = v
+    d["zoom"] = zoom
     d["cur"] = max(0, min(d.get("cur", 0), len(d["photos"]) - 1))
 
 
@@ -1615,6 +1663,114 @@ def schedule_pult(update, ctx):
     task.add_done_callback(_TASKS.discard)
 
 
+# ============ Шаблон по образцу ============
+SAMPLE_DIR = os.path.join(db.DATA_DIR, "samples")
+
+
+def _sample_path(uid):
+    return os.path.join(SAMPLE_DIR, f"{uid}.img")
+
+
+def _sample_kb(ctx):
+    return KB([[Btn(tx(ctx, "b_smp_save"), callback_data="smp:save")],
+               [Btn(tx(ctx, "b_smp_again"), callback_data="smp:again"),
+                Btn(tx(ctx, "b_smp_other"), callback_data="smp:start")]])
+
+
+async def _sample_build(update, ctx, b, data):
+    """Образец → шаблон → «рядом» с кнопками. Ошибки — понятным текстом, без падения."""
+    uid = update.effective_user.id
+    wait = await say(update, tx(ctx, "smp_wait"), kind="keep")
+    try:
+        base = await run(web.brand_ctx, b["id"])
+        spec, fmt, _, jpg, notes, _ = await run(SMP.make, data, base, bool(base.logos))
+    except SMP.SampleError as e:
+        logger.warning("образец: %s", e)
+        db.log_event("sample_fail", uid, b["id"], code=e.code)
+        await say(update, tx(ctx, "smp_off", support=esc(SUPPORT)) if e.code == "not_configured" else tx(ctx, "smp_fail"),
+                  kind="notice")
+        return
+    except Exception as e:
+        logger.exception("образец: %s", e)
+        db.log_event("sample_fail", uid, b["id"], code="crash")
+        await say(update, tx(ctx, "smp_fail"), kind="notice")
+        return
+    finally:
+        if wait:
+            await delete_ids(ctx.bot, update.effective_chat.id, [wait.message_id] if hasattr(wait, "message_id") else [])
+    ctx.user_data["smp"] = {"bid": b["id"], "spec": spec, "fmt": fmt}
+    extra = ""
+    if notes.get("weak") or notes.get("missed"):
+        what = ", ".join(tx(ctx, "smp_role_" + r) for r in dict.fromkeys(notes["weak"] + notes["missed"]))
+        extra += tx(ctx, "smp_weak", what=what)
+    if notes.get("fonts"):
+        extra += tx(ctx, "smp_fonts", fonts=", ".join(R.FONTS[f]["label"] for f in notes["fonts"] if f in R.FONTS) or "—")
+    await update.effective_chat.send_photo(io.BytesIO(jpg), caption=tx(ctx, "smp_ready", notes=extra),
+                                           parse_mode=HTML, reply_markup=_sample_kb(ctx))
+    db.log_event("sample_built", uid, b["id"], fmt=fmt, layers=len(spec["feed"]["layers"]),
+                 weak=len(notes.get("weak") or []))
+
+
+async def on_sample_photo(update, ctx, b):
+    ctx.user_data.pop("await", None)
+    data, _ = await get_file_bytes(update, ctx)
+    if not data or not is_image(data):
+        await say(update, tx(ctx, "photo_bad"), kind="notice")
+        return
+    os.makedirs(SAMPLE_DIR, exist_ok=True)
+    with open(_sample_path(update.effective_user.id), "wb") as f:
+        f.write(data)
+    await _sample_build(update, ctx, b, data)
+
+
+async def on_sample_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    L(ctx, update)
+    uid = update.effective_user.id
+    action = update.callback_query.data.split(":", 1)[1]
+    b, _ = current_brand(uid)
+    if not b or not is_editor(b) or not db.plan_active(b):
+        await answer(update)
+        return
+    if action == "start":
+        await answer(update)
+        if not SMP.enabled():
+            await say(update, tx(ctx, "smp_off", support=esc(SUPPORT)), kind="notice")
+            return
+        ctx.user_data["await"] = "sample"
+        await say(update, tx(ctx, "smp_ask"))
+    elif action == "again":
+        await answer(update)
+        try:
+            with open(_sample_path(uid), "rb") as f:
+                data = f.read()
+        except OSError:
+            ctx.user_data["await"] = "sample"
+            await say(update, tx(ctx, "smp_ask"))
+            return
+        await _sample_build(update, ctx, b, data)
+    elif action == "save":
+        st = ctx.user_data.get("smp")
+        if not st or st.get("bid") != b["id"]:
+            await answer(update)
+            return
+        n = sum(1 for t in db.list_templates(b["id"]) if t["name"].startswith(tx(ctx, "smp_name"))) + 1
+        name = tx(ctx, "smp_name") + (f" {n}" if n > 1 else "")
+        tid = db.create_template(b["id"], name, S.sanitize_spec(st["spec"]))
+        await answer(update)
+        if not isinstance(tid, int):
+            await say(update, tx(ctx, "smp_full", n=db.MAX_TEMPLATES), kind="notice")
+            return
+        db.set_prefs(uid, b["id"], tid=tid, fmt=st["fmt"] if st["fmt"] in FORMATS else "orig")
+        ctx.user_data.pop("smp", None)
+        try:
+            await update.callback_query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+        eb = editor_btn(ctx, b["id"])
+        await say(update, tx(ctx, "smp_saved", name=esc(name)), KB([[eb]]) if eb else None, kind="keep")
+        db.log_event("sample_saved", uid, b["id"], fmt=st["fmt"])
+
+
 async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     L(ctx, update)
     uid = update.effective_user.id
@@ -1628,6 +1784,8 @@ async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not db.has_asset(b["id"], "logo"):
         await say(update, tx(ctx, "no_logo"))
         return
+    if ctx.user_data.get("await") == "sample" and is_editor(b):
+        return await on_sample_photo(update, ctx, b)
     tpls = db.list_templates(b["id"])
     if not tpls:               # настройку бросили до выбора стиля — берём стартовые
         db.seed_templates(b["id"], ctx.user_data.get("lang", "ru"))
@@ -1639,7 +1797,7 @@ async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await say(update, tx(ctx, "photo_bad"), kind="notice")
         return
     msg = update.message
-    gid, cap = msg.media_group_id, msg.caption
+    gid, cap = msg.media_group_id, marked(msg.caption, msg.caption_entities) if msg.caption else msg.caption
     d = draft(ctx, uid)
     now = time.time()
     same_album = d and gid and d.get("group") == gid
@@ -1766,6 +1924,14 @@ async def on_quick_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await answer(update)
         n = len(d["photos"])
         d["cur"] = (d.get("cur", 0) + (1 if arg == "next" else -1)) % n
+        redraw = True
+    elif head == "q" and arg.startswith("zm:"):
+        await answer(update)
+        cur = str(d.get("cur", 0))
+        z = _zoom(d, int(cur)) + (ZOOM_STEP if arg.endswith("+") else -ZOOM_STEP)
+        z = max(1.0, min(ZOOM_MAX, round(z / ZOOM_STEP) * ZOOM_STEP))
+        d.setdefault("zoom", {})[cur] = z
+        d["actions"] = d.get("actions", 0) + 1
         redraw = True
     elif head == "q" and arg.startswith("fc:"):
         await answer(update)
@@ -1945,6 +2111,10 @@ async def on_quick_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     aw = ctx.user_data.pop("await", None)
     if aw == "adm_find" and is_admin(update):
         return await admin_find_results(update, ctx, update.message.text or "")
+    if aw == "sample":                    # ждём картинку образца, а пришёл текст — напоминаем
+        ctx.user_data["await"] = "sample"
+        await say(update, tx(ctx, "smp_ask"), kind="notice")
+        return
     d = draft(ctx, uid)
     if d and not db.member_role(d["bid"], uid):
         ctx.user_data.pop("q", None)
@@ -1957,7 +2127,7 @@ async def on_quick_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await say(update, tx(ctx, "welcome_new"), welcome_kb(ctx))
         return
-    text = update.message.text or ""
+    text = marked(update.message.text, update.message.entities)
     if aw == "tag":
         words = text.split()
         token = words[0].lstrip("#").strip() if words else ""
@@ -2591,6 +2761,7 @@ def build_app(token=None, base_url=None, base_file_url=None, persistence=True):
     app.add_handler(conv)
     app.add_handler(CommandHandler("cancel", cmd_cancel))      # вне диалога: сбросить ожидание ответа
     # Пост: срабатывает, когда диалог настройки не ждёт это сообщение
+    app.add_handler(CallbackQueryHandler(on_sample_cb, pattern=r"^smp:"))
     app.add_handler(CallbackQueryHandler(on_quick_cb, pattern=r"^q[tfh]?:"))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & IMG, on_quick_photo))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & TXT, on_quick_text))

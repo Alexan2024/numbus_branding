@@ -106,6 +106,22 @@ def sanitize_layer(L):
                 "opacity": _num(sh.get("opacity"), 0, 1, 0.5),
                 "color": _color(sh.get("color"), d={"mode": "fixed", "value": "p1"}),
             }
+        em = L.get("em")
+        if isinstance(em, dict):      # выделение «*…*»: свой цвет, вес, шрифт
+            e = {}
+            if isinstance(em.get("color"), dict):
+                e["color"] = _color(em.get("color"), d={"mode": "fixed", "value": "p2"})
+            if em.get("weight") is not None:
+                e["weight"] = int(_num(em.get("weight"), 100, 1000, 700))
+            if em.get("font") is not None:
+                e["font"] = _font(em.get("font"))
+            if e:
+                out["em"] = e
+        if out["source"] == "hashtag" and L.get("tag") == "clean":
+            out["tag"] = "clean"      # рубрика без «#», «_» → пробел
+        if isinstance(L.get("after"), str) and _ID.match(L["after"]):
+            out["after"] = L["after"]  # поток: верх слоя — под низом другого слоя
+            out["gap"] = _num(L.get("gap"), -0.5, 1, 0.02)
         p = L.get("plate")
         if isinstance(p, dict):
             out["plate"] = {
@@ -125,9 +141,26 @@ def sanitize_layer(L):
         out["stroke"] = _num(L.get("stroke"), 0, 0.1, 0)
         out["color"] = _color(L.get("color"), d={"mode": "fixed", "value": "p1"})
         out["opacity"] = _num(L.get("opacity"), 0, 1, 1)
+    elif t == "photo":                 # фото поста в рамке
+        out["fit"] = "inset" if L.get("fit") == "inset" else "box"
+        _pos(L, out, "tl")
+        out["m"] = _num(L.get("m"), 0, 0.4, 0.04)
+        out["w"] = _num(L.get("w"), 0.02, 2, 1)
+        out["h"] = _num(L.get("h"), 0.02, 4, 0.6)
+        out["radius"] = _num(L.get("radius"), 0, 1, 0)
+        out["zoom"] = _num(L.get("zoom"), 1, 4, 1)
+        if L.get("fx") is not None and L.get("fy") is not None:
+            out["fx"] = _num(L.get("fx"), 0, 1, 0.5)
+            out["fy"] = _num(L.get("fy"), 0, 1, 0.5)
+        out["bg"] = _color(L.get("bg"), d={"mode": "fixed", "value": "p0"})
+        if out["bg"]["mode"] != "fixed":
+            out["bg"] = {"mode": "fixed", "value": "p0"}
+        out["opacity"] = _num(L.get("opacity"), 0, 1, 1)
     elif t == "gradient":
         out["side"] = L.get("side") if L.get("side") in ("bottom", "top", "left", "right") else "bottom"
         out["extent"] = _num(L.get("extent"), 0.05, 1, 0.45)
+        if L.get("start"):
+            out["start"] = _num(L.get("start"), 0, 0.9, 0)    # градиент начинается не от края
         out["color"] = _color(L.get("color"), d={"mode": "fixed", "value": "p1"})
         out["opacity"] = _num(L.get("opacity"), 0, 1, 0.7)
         out["adaptive"] = bool(L.get("adaptive"))

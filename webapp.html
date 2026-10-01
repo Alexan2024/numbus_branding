@@ -241,6 +241,8 @@ const TT = {
     fixed: "Цвет", adaptive: "Авто", contrast: "Контраст", original: "Оригинал", light: "На тёмном", dark: "На светлом",
     srcTitle: "Заголовок", srcSubtitle: "Подзаголовок", srcHashtag: "Рубрика", srcCounter: "Счётчик", srcStatic: "Надпись",
     tLogo: "Логотип", tText: "Текст", tRect: "Фигура", tFrame: "Рамка", tGradient: "Градиент", tOverlay: "Затемнение",
+    tPhoto: "Фото в рамке", zoom: "Масштаб", focusPt: "Фокус", bgCanvas: "Фон кадра", emOn: "Выделение *…*",
+    emColor: "Цвет выделения", emWeight: "Вес выделения", tagClean: "Без # и _", afterL: "Под слоем", afterNone: "Нет", gap: "Отступ", gradStart: "Начало от края",
     top: "Верх", bottom: "Низ", left: "Лево", right: "Право", nowrap: "без переноса",
     storyOff: "Сторис для этого шаблона выключены.", storyOn: "Делать сторис", storyEnable: "Включить сторис",
     storyHint: "Слои сторис начнутся с копии ленты — дальше их можно менять отдельно.",
@@ -324,6 +326,8 @@ const TT = {
     fixed: "Colour", adaptive: "Auto", contrast: "Contrast", original: "Original", light: "On dark", dark: "On light",
     srcTitle: "Headline", srcSubtitle: "Subheadline", srcHashtag: "Tag", srcCounter: "Counter", srcStatic: "Label",
     tLogo: "Logo", tText: "Text", tRect: "Shape", tFrame: "Frame", tGradient: "Gradient", tOverlay: "Shade",
+    tPhoto: "Photo frame", zoom: "Zoom", focusPt: "Focus", bgCanvas: "Canvas", emOn: "Highlight *…*",
+    emColor: "Highlight colour", emWeight: "Highlight weight", tagClean: "No # and _", afterL: "Below layer", afterNone: "None", gap: "Gap", gradStart: "Start from edge",
     top: "Top", bottom: "Bottom", left: "Left", right: "Right", nowrap: "no wrap",
     storyOff: "Stories are off for this template.", storyOn: "Make stories", storyEnable: "Turn on stories",
     storyHint: "Story layers start as a copy of the feed — then you can change them separately.",
@@ -452,7 +456,7 @@ async function blobImage(blob) {
 /* ============================================================
    РЕНДЕР (зеркало render.py)
    ============================================================ */
-const FEED_SIZES = { "4:5": [1080, 1350], "3:4": [1080, 1440], "1:1": [1080, 1080], "3:2": [1080, 720], "9:16": [1080, 1920] };
+const FEED_SIZES = { "4:5": [1080, 1350], "3:4": [1080, 1440], "1:1": [1080, 1080], "3:2": [1080, 720], "16:9": [1080, 608], "1.91:1": [1080, 565], "9:16": [1080, 1920] };
 const STORY_SIZE = [1080, 1920];
 
 function hexRgb(s) {
@@ -539,7 +543,8 @@ function ensureFont(key) {
   return p;
 }
 function fontsOf(layers) {
-  return [...new Set(["inter", ...(layers || []).filter(L => L.type === "text" && !L.hidden).map(L => L.font)])];
+  const T = (layers || []).filter(L => L.type === "text" && !L.hidden);
+  return [...new Set(["inter", ...T.map(L => L.font), ...T.filter(L => L.em && L.em.font).map(L => L.em.font)])];
 }
 const qsize = s => Math.max(1, Math.round(s * 2) / 2);
 // Знаки, которых нет в шрифте (₽ в Playfair, № в Jost), браузер берёт из Inter — так же делает сервер
@@ -630,13 +635,14 @@ const typograf = (() => {
 /* --- текст --- */
 const TEXT_LINES_DEFAULT = 5, SHRINK_STEPS = 6, ELLIPSIS = "…";
 function applyCase(s, c) { return c === "upper" ? s.toUpperCase() : c === "lower" ? s.toLowerCase() : s; }
+function cleanTag(s) { return (s || "").replace(/^#+/, "").split("_").join(" ").trim(); }
 function textContent(L, env) {
   const f = env.fields;
   let s = "";
   const src = L.source || "static";
   if (src === "title") s = typograf(f.title || "");
   else if (src === "subtitle") s = typograf(f.subtitle || "");
-  else if (src === "hashtag") s = f.hashtag || "";
+  else if (src === "hashtag") { s = f.hashtag || ""; if (L.tag === "clean") s = cleanTag(s); }
   else if (src === "counter") { const n = Math.trunc(f.n || 0); s = n > 1 ? (L.text || "{i} / {n}").split("{i}").join(String(f.i || 1)).split("{n}").join(String(n)) : ""; }
   else s = L.text || "";
   return applyCase(s, L.case || "none");
@@ -647,58 +653,119 @@ function maxLines(L) {
 }
 const chars = s => Array.from(s);
 function trackedW(ctx, s, ls) { return s ? ctx.measureText(s).width + ls * (chars(s).length - 1) : 0; }
-function wrap(ctx, text, ls, maxw) {
+/* «*…*» — выделение (зеркало render.parse_marks): текст без звёздочек + маска по знакам */
+function parseMarks(s) {
+  const src = chars(s), toks = [];
+  for (let i = 0; i < src.length; i++) {
+    if (src[i] === "\\" && src[i + 1] === "*") { toks.push(["*", false]); i++; continue; }
+    toks.push([src[i], src[i] === "*"]);
+  }
+  const marks = toks.map((t, k) => t[1] ? k : -1).filter(k => k >= 0);
+  if (marks.length % 2) toks[marks[marks.length - 1]] = ["*", false];
+  const out = [], mask = [];
+  let em = false;
+  for (const [c, m] of toks) { if (m) { em = !em; continue; } out.push(c); mask.push(em); }
+  return { cs: out, mask };
+}
+function styleOf(L) {
+  const key = fontKey(L.font), wt = L.weight || 400, em = L.em || {};
+  return { key, wt, ekey: em.font ? fontKey(em.font) : key, ewt: em.weight || wt };
+}
+function segsOf(cs, mask) {
   const out = [];
-  for (const para of text.split("\n")) {
-    let line = "";
-    for (const w of para.split(" ")) {
-      const cand = line === "" ? w : line + " " + w;
-      if (line !== "" && maxw > 0 && trackedW(ctx, cand, ls) > maxw) { out.push(line); line = w; }
-      else line = cand;
+  let a = 0;
+  for (let k = 1; k <= cs.length; k++) if (k === cs.length || mask[k] !== mask[a]) { out.push([cs.slice(a, k).join(""), mask[a]]); a = k; }
+  return out;
+}
+function styledW(ctx, st, size, cs, mask, ls) {
+  if (!cs.length) return 0;
+  let w = 0;
+  for (const [t, e] of segsOf(cs, mask)) { setFont(ctx, e ? st.ekey : st.key, e ? st.ewt : st.wt, size); w += ctx.measureText(t).width; }
+  return w + ls * (cs.length - 1);
+}
+function wrap(ctx, st, size, cs, mask, ls, maxw) {
+  const out = [];
+  let p0 = 0;
+  const paras = [];
+  for (let k = 0; k <= cs.length; k++) if (k === cs.length || cs[k] === "\n") { paras.push([p0, k]); p0 = k + 1; }
+  for (const [pa, pb] of paras) {
+    const pc = cs.slice(pa, pb), pm = mask.slice(pa, pb);
+    const words = [];
+    let s0 = 0;
+    for (let k = 0; k <= pc.length; k++) if (k === pc.length || pc[k] === " ") { words.push([s0, k]); s0 = k + 1; }
+    let a = null, b = null;
+    for (const [ws, we] of words) {
+      if (a === null) { a = ws; b = we; continue; }
+      if (maxw > 0 && styledW(ctx, st, size, pc.slice(a, we), pm.slice(a, we), ls) > maxw) { out.push({ cs: pc.slice(a, b), m: pm.slice(a, b) }); a = ws; }
+      b = we;
     }
-    out.push(line);
+    out.push(a === null ? { cs: [], m: [] } : { cs: pc.slice(a, b), m: pm.slice(a, b) });
   }
   return out;
 }
-function truncateLines(ctx, lines, n, ls, maxw) {
+function truncateLines(ctx, st, size, lines, n, ls, maxw) {
   const keep = lines.slice(0, n);
-  let last = keep[keep.length - 1];
-  while (maxw > 0 && last.includes(" ") && trackedW(ctx, last + ELLIPSIS, ls) > maxw) last = last.slice(0, last.lastIndexOf(" "));
-  keep[keep.length - 1] = last.replace(/[ ,;:—–-]+$/, "") + ELLIPSIS;
+  let { cs, m } = keep[keep.length - 1];
+  const ell = chars(ELLIPSIS);
+  while (maxw > 0 && cs.includes(" ") && styledW(ctx, st, size, cs.concat(ell), m.concat([false]), ls) > maxw) {
+    const k = cs.lastIndexOf(" "); cs = cs.slice(0, k); m = m.slice(0, k);
+  }
+  let k = cs.length;
+  while (k > 0 && " ,;:—–-".includes(cs[k - 1])) k--;
+  keep[keep.length - 1] = { cs: cs.slice(0, k).concat(ell), m: m.slice(0, k).concat([k ? !!m[k - 1] : false]) };
   return keep;
 }
 function layoutText(ctx, L, env, content, W) {
+  const pm = parseMarks(content);
   const size0 = (L.size ?? 0.04) * W;
-  const key = fontKey(L.font), wt = L.weight || 400, tr = L.tracking || 0;
+  const st = styleOf(L), tr = L.tracking || 0;
   const maxw = (L.maxw || 0) * W, nmax = maxLines(L);
   let size = size0;
-  setFont(ctx, key, wt, size);
   let ls = tr * size;
-  let lines = wrap(ctx, content, ls, maxw);
+  let lines = wrap(ctx, st, size, pm.cs, pm.mask, ls, maxw);
   let small = false, cut = false;
   if (nmax > 0 && lines.length > nmax) {
     if (maxw > 0) {
       for (let k = 1; k <= SHRINK_STEPS; k++) {
         size = size0 * (1 - 0.05 * k);
-        setFont(ctx, key, wt, size);
         ls = tr * size;
-        lines = wrap(ctx, content, ls, maxw);
+        lines = wrap(ctx, st, size, pm.cs, pm.mask, ls, maxw);
         if (lines.length <= nmax) break;
       }
       small = true;
     }
-    if (lines.length > nmax) { lines = truncateLines(ctx, lines, nmax, ls, maxw); cut = true; }
+    if (lines.length > nmax) { lines = truncateLines(ctx, st, size, lines, nmax, ls, maxw); cut = true; }
   }
-  let widest = Math.max(0, ...lines.map(l => trackedW(ctx, l, ls)));
+  const lw = ln => styledW(ctx, st, size, ln.cs, ln.m, ls);
+  let widest = Math.max(0, ...lines.map(lw));
   if (maxw > 0 && widest > maxw) {
     size = size * maxw / widest;
-    setFont(ctx, key, wt, size);
     ls = tr * size;
-    widest = Math.max(0, ...lines.map(l => trackedW(ctx, l, ls)));
+    widest = Math.max(0, ...lines.map(lw));
   }
+  setFont(ctx, st.key, st.wt, size);
   const cap = ctx.measureText("H").actualBoundingBoxAscent;
   const adv = (L.leading ?? 1.1) * size;
-  return { lines, size, ls, cap, adv, key, wt, w: widest, h: cap + (lines.length - 1) * adv, small, cut };
+  return { lines, size, ls, cap, adv, st, key: st.key, wt: st.wt, w: widest, h: cap + (lines.length - 1) * adv, small, cut };
+}
+/* строки по кускам: основной стиль и выделение — своим шрифтом и цветом */
+function paintLines(c, m, align, tx, ty, fills) {
+  m.lines.forEach((ln, i) => {
+    const lw = styledW(c, m.st, m.size, ln.cs, ln.m, m.ls);
+    const off = align === "left" ? 0 : align === "center" ? (m.w - lw) / 2 : m.w - lw;
+    let x = tx + off;
+    const by = ty + m.cap + i * m.adv;
+    for (const [seg, e] of segsOf(ln.cs, ln.m)) {
+      setFont(c, e ? m.st.ekey : m.st.key, e ? m.st.ewt : m.st.wt, m.size);
+      c.fillStyle = fills[e ? 1 : 0];
+      if (m.ls === 0) { c.fillText(seg, x, by); x += c.measureText(seg).width; }
+      else {
+        const cs = chars(seg);
+        cs.forEach((ch, k) => c.fillText(ch, x + c.measureText(cs.slice(0, k).join("")).width + m.ls * k, by));
+        x += c.measureText(seg).width + m.ls * cs.length;
+      }
+    }
+  });
 }
 function drawText(ctx, L, env) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
@@ -708,7 +775,9 @@ function drawText(ctx, L, env) {
   const plate = L.plate;
   const padx = plate ? (plate.padx ?? 0.8) * m.size : 0, pady = plate ? (plate.pady ?? 0.5) * m.size : 0;
   const bw = m.w + 2 * padx, bh = m.h + 2 * pady;
-  const [left, top] = place(L.anchor, L.x || 0, L.y || 0, bw, bh, W, H);
+  let [left, top] = place(L.anchor, L.x || 0, L.y || 0, bw, bh, W, H);
+  const prev = L.after && env.boxes ? env.boxes[L.after] : null;
+  if (prev) top = prev[1] + prev[3] + (L.gap ?? 0.02) * W;   // поток: под другим слоем
   const op = L.opacity ?? 1;
   if (plate) {
     const pc = resolveColor(plate.color, env, ctx, [left, top, bw, bh]) || [0, 0, 0];
@@ -720,52 +789,29 @@ function drawText(ctx, L, env) {
   }
   const tx = left + padx, ty = top + pady;
   const col = resolveColor(L.color, env, ctx, [tx, ty, m.w, m.h]) || [255, 255, 255];
+  const ecol = L.em && L.em.color ? (resolveColor(L.em.color, env, ctx, [tx, ty, m.w, m.h]) || col) : col;
   if (env.notes && (L.source === "title" || L.source === "subtitle") && (m.cut || m.small)) env.notes.add(L.source + (m.cut ? "_cut" : "_small"));
   const sh = L.shadow;
-  const paint = () => {
-    const align = L.align || "left";
-    m.lines.forEach((ln, i) => {
-      const lw = trackedW(ctx, ln, m.ls);
-      const off = align === "left" ? 0 : align === "center" ? (m.w - lw) / 2 : m.w - lw;
-      const bx = tx + off, by = ty + m.cap + i * m.adv;
-      if (m.ls === 0) ctx.fillText(ln, bx, by);
-      else {
-        const cs = chars(ln);
-        cs.forEach((c, k) => ctx.fillText(c, bx + ctx.measureText(cs.slice(0, k).join("")).width + m.ls * k, by));
-      }
-    });
-  };
-  setFont(ctx, m.key, m.wt, m.size);
+  const align = L.align || "left";
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
   if (sh && (sh.blur ?? 0.35) > 0) {
     // мягкая тень без смещения: как в render.py (размытие = blur·кегль, сигма — его половина)
-    const sc = resolveColor(sh.color, env, ctx, [tx, ty, m.w, m.h]) || [0, 0, 0];
-    const blur = (sh.blur ?? 0.35) * m.size;
+    const sc = rgb(resolveColor(sh.color, env, ctx, [tx, ty, m.w, m.h]) || [0, 0, 0]);
     const tmp = document.createElement("canvas");
     tmp.width = ctx.canvas.width; tmp.height = ctx.canvas.height;
     const t2 = tmp.getContext("2d");
-    t2.font = ctx.font; t2.textBaseline = "alphabetic"; t2.textAlign = "left";
-    t2.fillStyle = rgb(sc);
+    t2.textBaseline = "alphabetic"; t2.textAlign = "left";
     t2.globalAlpha = Math.round(255 * op) / 255;
-    t2.shadowColor = rgb(sc); t2.shadowBlur = blur; t2.shadowOffsetX = tmp.width * 2; t2.shadowOffsetY = 0;
+    t2.shadowColor = sc; t2.shadowBlur = (sh.blur ?? 0.35) * m.size; t2.shadowOffsetX = tmp.width * 2; t2.shadowOffsetY = 0;
     // рисуем текст за краем, а тень — на месте: остаётся только тень
-    const saved = ctx; const fake = t2;
-    const align = L.align || "left";
-    m.lines.forEach((ln, i) => {
-      const lw = trackedW(saved, ln, m.ls);
-      const off = align === "left" ? 0 : align === "center" ? (m.w - lw) / 2 : m.w - lw;
-      const bx = tx + off - tmp.width * 2, by = ty + m.cap + i * m.adv;
-      if (m.ls === 0) fake.fillText(ln, bx, by);
-      else { const cs = chars(ln); cs.forEach((c, k) => fake.fillText(c, bx + saved.measureText(cs.slice(0, k).join("")).width + m.ls * k, by)); }
-    });
+    paintLines(t2, m, align, tx - tmp.width * 2, ty, [sc, sc]);
     ctx.globalAlpha = sh.opacity ?? 0.5;
     ctx.drawImage(tmp, 0, 0);
     ctx.globalAlpha = 1;
   }
-  ctx.fillStyle = rgb(col);
   ctx.globalAlpha = Math.round(255 * op) / 255;
-  paint();
+  paintLines(ctx, m, align, tx, ty, [rgb(col), rgb(ecol)]);
   ctx.globalAlpha = 1;
   return [left, top, bw, bh];
 }
@@ -828,19 +874,23 @@ function drawRect(ctx, L, env) {
 function drawGradient(ctx, L, env) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
   const side = L.side || "bottom", vert = side === "bottom" || side === "top";
-  let ext = Math.round((L.extent ?? 0.4) * (vert ? H : W));
-  ext = Math.max(1, Math.min(ext, vert ? H : W));
-  const zone = { bottom: [0, H - ext, W, ext], top: [0, 0, W, ext], left: [0, 0, ext, H], right: [W - ext, 0, ext, H] }[side];
+  const D = vert ? H : W;
+  const st = Math.round((L.start || 0) * D);   // сплошная часть у края: градиент начинается дальше
+  let ext = Math.round((L.extent ?? 0.4) * D);
+  ext = Math.max(1, Math.min(ext, D - st));
+  const tot = st + ext;
+  const zone = { bottom: [0, H - tot, W, tot], top: [0, 0, W, tot], left: [0, 0, tot, H], right: [W - tot, 0, tot, H] }[side];
   let a = L.opacity ?? 0.6;
   if (L.adaptive) a *= 0.4 + 0.6 * luma(...avgColor(ctx, zone)) / 255;
   a = Math.max(0, Math.min(0.99, a + (env.dark || 0)));
   const c = resolveColor(L.color, env, ctx, zone) || [0, 0, 0];
   // от края кадра (полная плотность) внутрь зоны — по той же плавной кривой, что render.py
-  const g = side === "bottom" ? ctx.createLinearGradient(0, H, 0, H - ext)
-          : side === "top" ? ctx.createLinearGradient(0, 0, 0, ext)
-          : side === "left" ? ctx.createLinearGradient(0, 0, ext, 0)
-          : ctx.createLinearGradient(W, 0, W - ext, 0);
-  EASE_POS.forEach((p, i) => g.addColorStop(p, `rgba(${c[0]},${c[1]},${c[2]},${EASE_VAL[i] * a})`));
+  const g = side === "bottom" ? ctx.createLinearGradient(0, H, 0, H - tot)
+          : side === "top" ? ctx.createLinearGradient(0, 0, 0, tot)
+          : side === "left" ? ctx.createLinearGradient(0, 0, tot, 0)
+          : ctx.createLinearGradient(W, 0, W - tot, 0);
+  if (st) g.addColorStop(0, `rgba(${c[0]},${c[1]},${c[2]},${a})`);
+  EASE_POS.forEach((p, i) => g.addColorStop((st + p * ext) / tot, `rgba(${c[0]},${c[1]},${c[2]},${EASE_VAL[i] * a})`));
   ctx.fillStyle = g;
   ctx.fillRect(...zone);
   return zone;
@@ -895,7 +945,30 @@ function drawImageLayer(ctx, L, env) {
   ctx.globalAlpha = 1;
   return box;
 }
-const DRAW = { text: drawText, logo: drawLogo, rect: drawRect, gradient: drawGradient, overlay: drawOverlay, image: drawImageLayer };
+/* фото поста в рамке (зеркало render.draw_photo_layer); фон кадра под ним — bg слоя */
+function drawPhotoLayer(ctx, L, env) {
+  const photo = env.photo;
+  if (!photo) return null;
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const [x, y, w, h] = rectBox(L, W, H);
+  const bw = Math.round(w), bh = Math.round(h);
+  if (bw < 2 || bh < 2) return null;
+  const pw = photo.naturalWidth || photo.width, ph = photo.naturalHeight || photo.height;
+  const ir = pw / ph, cr = bw / bh, z = Math.max(1, Math.min(4, (L.zoom || 1) * (env.zoom || 1)));
+  const [fx, fy] = (L.fx != null && L.fy != null) ? [L.fx, L.fy] : (env.focus || [0.5, 0.5]);
+  let dw, dh;
+  if (ir > cr) { dh = bh; dw = bh * ir; } else { dw = bw; dh = bw / ir; }
+  dw = Math.round(dw * z); dh = Math.round(dh * z);
+  ctx.save();
+  rrPath(ctx, Math.round(x), Math.round(y), bw, bh, (L.radius || 0) * Math.min(bw, bh) / 2);
+  ctx.clip();
+  ctx.globalAlpha = Math.round(255 * (L.opacity ?? 1)) / 255;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(photo, Math.round(x) - Math.floor((dw - bw) * fx), Math.round(y) - Math.floor((dh - bh) * fy), dw, dh);
+  ctx.restore();
+  return [x, y, w, h];
+}
+const DRAW = { photo: drawPhotoLayer, text: drawText, logo: drawLogo, rect: drawRect, gradient: drawGradient, overlay: drawOverlay, image: drawImageLayer };
 
 function drawPhoto(ctx, photo, W, H, focus) {
   const pw = photo.naturalWidth || photo.width, ph = photo.naturalHeight || photo.height;
@@ -911,10 +984,13 @@ const onSlide = (L, i) => L.slides === "first" ? i <= 1 : L.slides === "rest" ? 
 function renderSurface(canvas, W, H, photo, layers, env) {
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
-  if (photo) drawPhoto(ctx, photo, W, H, env.focus);
-  const boxes = {};
   const slide = Math.trunc((env.fields && env.fields.i) || 1);
+  const frame = (layers || []).find(L => L.type === "photo" && !L.hidden && onSlide(L, slide));
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+  if (frame) { ctx.fillStyle = rgb(ref(env, (frame.bg && frame.bg.value) || "p0", "#FFFFFF")); ctx.fillRect(0, 0, W, H); }
+  else if (photo) drawPhoto(ctx, photo, W, H, env.focus);
+  const boxes = {};
+  env.boxes = boxes; env.photo = photo;
   for (const L of layers || []) {
     if (L.hidden || !onSlide(L, slide)) continue;
     const fn = DRAW[L.type];
@@ -1594,9 +1670,10 @@ function layerTitle(L) {
   }
   if (L.type === "rect") return L.fit === "inset" ? t("tFrame") : t("tRect");
   if (L.type === "image") return t("tImage");
+  if (L.type === "photo") return t("tPhoto");
   return t(L.type === "gradient" ? "tGradient" : "tOverlay");
 }
-const GLYPH = { logo: "◎", text: "Aa", rect: "□", gradient: "◐", overlay: "■", image: "▦" };
+const GLYPH = { logo: "◎", text: "Aa", rect: "□", gradient: "◐", overlay: "■", image: "▦", photo: "▣" };
 function renderLayerList() {
   const box = document.getElementById("layers");
   if (!box) return;
@@ -1649,6 +1726,7 @@ function addLayerSheet() {
     [t("srcCounter"), { type: "text", source: "counter", text: "{i} / {n}", anchor: "tr", x: 0.05, y: 0.05, font: f, weight: 500, size: 0.024, tracking: 0, leading: 1.1, case: "none", align: "left", maxw: 0, color: { ...CT }, opacity: 1 }],
     [t("tRect"), { type: "rect", fit: "box", anchor: "bl", x: 0, y: 0, w: 1, h: 0.18, radius: 0, stroke: 0, color: { mode: "fixed", value: "p1" }, opacity: 0.85, m: 0.04 }],
     [t("tFrame"), { type: "rect", fit: "inset", m: 0.04, stroke: 0.003, radius: 0, anchor: "mc", x: 0, y: 0, w: 0.2, h: 0.1, color: { ...CT }, opacity: 0.9 }],
+    [t("tPhoto"), { type: "photo", fit: "box", anchor: "bl", x: 0, y: 0, w: 1, h: 0.75, radius: 0, zoom: 1, bg: { mode: "fixed", value: "p0" }, opacity: 1 }],
     [t("tGradient"), { type: "gradient", side: "bottom", extent: 0.45, color: { mode: "fixed", value: "p1" }, opacity: 0.75, adaptive: true }],
     [t("tOverlay"), { type: "overlay", color: { mode: "fixed", value: "p1" }, opacity: 0.25 }],
   ];
@@ -1673,7 +1751,7 @@ function addLayerSheet() {
       bg.remove();
       const L = { ...clone(proto), id: uid() };
       // фон-слои — вниз стопки, остальное — наверх
-      if (L.type === "gradient" || L.type === "overlay") layers().unshift(L); else layers().push(L);
+      if (L.type === "gradient" || L.type === "overlay" || L.type === "photo") layers().unshift(L); else layers().push(L);
       markDirty();
       select(L.id);
     } }, label));
@@ -1971,6 +2049,26 @@ function renderLayerProps() {
       add(slider(t("shadowOpacity"), () => S_.opacity, v => S_.opacity = v, 0, 1, 0.01, pct));
       add(colorCtl(t("shadowColor"), () => S_.color, c => { S_.color = c; markDirty(); }));
     }
+    // выделение «*…*» (в боте — жирный текст в подписи)
+    add(h("div", { class: "row" }, h("label", {}, t("emOn")), h("div", { class: "ctl", style: "justify-content:flex-end" },
+      sw(!!L.em, v => { if (v) L.em = { color: { mode: "fixed", value: "p2" }, weight: Math.min(fontInfo(L.font).max, (L.weight || 400) + 200) }; else delete L.em; markDirty(); renderProps(); }))));
+    if (L.em) {
+      const E = L.em;
+      if (!E.color) E.color = { mode: "fixed", value: "p2" };
+      add(colorCtl(t("emColor"), () => E.color, c => { E.color = c; markDirty(); }));
+      if (!fi.custom && fi.max > fi.min) add(slider(t("emWeight"), () => E.weight || L.weight, v => E.weight = v, fi.min, fi.max, 10, v => String(Math.round(v))));
+    }
+    if (L.source === "hashtag") add(h("div", { class: "row" }, h("label", {}, t("tagClean")), h("div", { class: "ctl", style: "justify-content:flex-end" },
+      sw(L.tag === "clean", v => { if (v) L.tag = "clean"; else delete L.tag; markDirty(); }))));
+    // поток: верх слоя — под другим слоем (заголовок любой длины не наезжает на подзаголовок)
+    const arr = layers(), idx = arr.indexOf(L);
+    const above = arr.slice(0, idx).filter(o => o.type === "text" || o.type === "photo" || o.type === "rect" || o.type === "logo");
+    const af = h("select", { "aria-label": t("afterL") });
+    af.append(h("option", { value: "" }, t("afterNone")));
+    for (const o of above) af.append(h("option", { value: o.id, selected: o.id === L.after ? true : null }, layerTitle(o)));
+    af.addEventListener("change", () => { if (af.value) { L.after = af.value; if (L.gap == null) L.gap = 0.02; } else { delete L.after; delete L.gap; } markDirty(); renderProps(); });
+    add(row(t("afterL"), af));
+    if (L.after) add(slider(t("gap"), () => L.gap, v => L.gap = v, -0.1, 0.3, 0.001, px));
     if (L.plate) {
       const P = L.plate;
       add(colorCtl(t("plateColor"), () => P.color, c => { P.color = c; markDirty(); }));
@@ -1994,9 +2092,32 @@ function renderLayerProps() {
     add(slider(t("radius"), () => L.radius, v => L.radius = v, 0, 1, 0.01, pct));
     add(colorCtl(t("color"), () => L.color, c => { L.color = c; markDirty(); }));
     add(slider(t("opacity"), () => L.opacity, v => L.opacity = v, 0, 1, 0.01, pct));
+  } else if (L.type === "photo") {
+    add(seg(t("fit"), [["box", t("fitBox")], ["inset", t("fitInset")]], () => L.fit, v => L.fit = v, true));
+    if (L.fit === "inset") add(slider(t("margin"), () => L.m, v => L.m = v, 0, 0.2, 0.001, px));
+    else {
+      add(...posCtls(L));
+      add(slider(t("width"), () => L.w, v => L.w = v, 0.05, 1.2, 0.001, px));
+      const [W, H] = dims();
+      add(slider(t("height"), () => L.h, v => L.h = v, 0.05, +(H / W + 0.2).toFixed(2), 0.001, px));
+    }
+    add(slider(t("radius"), () => L.radius, v => L.radius = v, 0, 1, 0.01, pct));
+    add(slider(t("zoom"), () => L.zoom || 1, v => L.zoom = v, 1, 4, 0.05, v => `×${(+v).toFixed(2)}`));
+    const fp = L.fx != null ? (L.fy < 0.34 ? "t" : L.fy > 0.66 ? "b" : "m") + (L.fx < 0.34 ? "l" : L.fx > 0.66 ? "r" : "c") : "mc";
+    const grid = h("div", { class: "pts", role: "group", "aria-label": t("focusPt") });
+    for (const v of "tmb") for (const hz of "lcr") {
+      const a = v + hz;
+      grid.append(h("button", { "aria-pressed": String(fp === a), "aria-label": a, onclick: () => {
+        L.fx = { l: 0, c: 0.5, r: 1 }[hz]; L.fy = { t: 0, m: 0.5, b: 1 }[v]; markDirty(); renderProps(); } }));
+    }
+    add(row(t("focusPt"), grid));
+    if (!L.bg) L.bg = { mode: "fixed", value: "p0" };
+    add(colorCtl(t("bgCanvas"), () => L.bg, c => { L.bg = c.mode === "fixed" ? c : { mode: "fixed", value: "p0" }; markDirty(); }));
+    add(slider(t("opacity"), () => L.opacity, v => L.opacity = v, 0, 1, 0.01, pct));
   } else if (L.type === "gradient") {
     add(seg(t("side"), [["bottom", t("bottom")], ["top", t("top")], ["left", t("left")], ["right", t("right")]], () => L.side, v => L.side = v));
     add(slider(t("extent"), () => L.extent, v => L.extent = v, 0.05, 1, 0.01, pct));
+    add(slider(t("gradStart"), () => L.start || 0, v => { if (v > 0) L.start = v; else delete L.start; }, 0, 0.9, 0.01, pct));
     add(colorCtl(t("color"), () => L.color, c => { L.color = c; markDirty(); }));
     add(slider(t("opacity"), () => L.opacity, v => L.opacity = v, 0, 1, 0.01, pct));
     add(h("div", { class: "row" }, h("label", {}, t("adaptiveShade")), h("div", { class: "ctl", style: "justify-content:flex-end" },
@@ -2069,16 +2190,16 @@ function previewFields() {
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 function movable(L) {
   return L && !L.hidden && !(L.type === "gradient" || L.type === "overlay"
-    || (L.type === "rect" && L.fit === "inset") || (L.type === "image" && L.fit !== "box"));
+    || ((L.type === "rect" || L.type === "photo") && L.fit === "inset") || (L.type === "image" && L.fit !== "box"));
 }
 function scalable(L) {
-  return movable(L) && (L.type === "logo" || L.type === "text" || L.type === "image" || L.type === "rect");
+  return movable(L) && (L.type === "logo" || L.type === "text" || L.type === "image" || L.type === "rect" || L.type === "photo");
 }
-function sizeOf(L) { return L.type === "text" ? { size: L.size } : L.type === "rect" ? { w: L.w, h: L.h } : { w: L.w }; }
+function sizeOf(L) { return L.type === "text" ? { size: L.size } : (L.type === "rect" || L.type === "photo") ? { w: L.w, h: L.h } : { w: L.w }; }
 function applyScale(L, base, k) {
   const r4 = v => Math.round(v * 10000) / 10000;
   if (L.type === "text") L.size = r4(clamp(base.size * k, 0.005, 0.4));
-  else if (L.type === "rect") { L.w = r4(clamp(base.w * k, 0.001, 2)); L.h = r4(clamp(base.h * k, 0.001, 4)); }
+  else if (L.type === "rect" || L.type === "photo") { L.w = r4(clamp(base.w * k, 0.001, 2)); L.h = r4(clamp(base.h * k, 0.001, 4)); }
   else L.w = r4(clamp(base.w * k, 0.01, 1.2));
 }
 function bindDrag(cv) {

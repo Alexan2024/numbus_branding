@@ -28,6 +28,13 @@ lines — сколько строк максимум: длинный текст 
 {"mode":"contrast","light":..,"dark":..} — светлый на тёмном фоне, тёмный на светлом;
 {"mode":"original"} — только для логотипа: цвета файла.
 
+ФОТО В РАМКЕ. Слой photo: фото поста в прямоугольнике (как rect: box или inset), radius,
+zoom ≥ 1, fx/fy — своя точка фокуса (иначе — из пульта). Если такой слой есть на кадре,
+кадр заливается цветом bg этого слоя, а фото рисуется только в рамке.
+
+ВЫДЕЛЕНИЕ. «*…*» в тексте → стиль L["em"] (color, weight, font). Обратная косая перед * — сама звёздочка.
+ПОТОК. L["after"] = id слоя: верх слоя = низ того слоя + gap·W.
+
 ФОТО переводится в sRGB (снимки iPhone — Display P3), JPEG сохраняется 4:4:4.
 """
 import io
@@ -455,21 +462,32 @@ def sample_image(w=1600, h=2000) -> Image.Image:
                            sun.filter(ImageFilter.GaussianBlur(w * 0.03)))
 
 
-def cover_box(iw, ih, cw, ch, focus=None):
+ZOOM_MAX = 4.0
+
+
+def cover_box(iw, ih, cw, ch, focus=None, zoom=1.0):
     """Как фото ляжет в кадр: (dw, dh, x0, y0). focus — (fx, fy) от 0 до 1:
-    какая часть фото остаётся в кадре при обрезке (0.5 — середина)."""
+    какая часть фото остаётся в кадре при обрезке (0.5 — середина).
+    zoom ≥ 1 — фото крупнее, чем «заполнить кадр»."""
     fx, fy = focus or (0.5, 0.5)
+    z = max(1.0, min(ZOOM_MAX, float(zoom or 1.0)))
     ir, cr = iw / ih, cw / ch
     if ir > cr:
-        dh, dw = ch, int(round(ch * ir))
+        dh, dw = ch, ch * ir
     else:
-        dw, dh = cw, int(round(cw / ir))
+        dw, dh = cw, cw / ir
+    dw, dh = int(round(dw * z)), int(round(dh * z))
     return dw, dh, int((dw - cw) * fx), int((dh - ch) * fy)
 
 
-def fit_cover(img, cw, ch, focus=None):
-    dw, dh, x0, y0 = cover_box(img.width, img.height, cw, ch, focus)
-    return img.resize((dw, dh), Image.LANCZOS).crop((x0, y0, x0 + cw, y0 + ch))
+def fit_cover(img, cw, ch, focus=None, zoom=1.0):
+    dw, dh, x0, y0 = cover_box(img.width, img.height, cw, ch, focus, zoom)
+    if (x0, y0, dw, dh) == (0, 0, cw, ch) and img.size == (cw, ch):
+        return img.copy()
+    # большие масштабы: режем сначала исходник, потом уменьшаем — без лишней памяти
+    sx, sy = img.width / dw, img.height / dh
+    box = (x0 * sx, y0 * sy, (x0 + cw) * sx, (y0 + ch) * sy)
+    return img.resize((cw, ch), Image.LANCZOS, box=box)
 
 
 def crop_share(iw, ih, cw, ch):
@@ -512,7 +530,8 @@ def shift_tone(r, g, b, pct):
 class Ctx:
     """Всё, что нужно слоям: палитра, логотипы, свои шрифты, значения полей."""
 
-    def __init__(self, palette=None, logos=None, customs=None, fields=None, dark=0.0, images=None, focus=None):
+    def __init__(self, palette=None, logos=None, customs=None, fields=None, dark=0.0, images=None, focus=None,
+                 zoom=1.0):
         self.palette = palette or []
         self.logos = logos or {}          # {"logo": RGBA Image, "logo_alt": ...}
         self.customs = customs or {}      # {"font1": bytes, ...}
@@ -520,6 +539,9 @@ class Ctx:
         self.dark = float(dark)
         self.images = images              # callable(asset_id) -> RGBA Image | None (графика из макетов)
         self.focus = focus                # (fx, fy) — точка фокуса фото
+        self.zoom = zoom or 1.0           # масштаб фото поверх «заполнить кадр» (пульт поста)
+        self.photo = None                 # фото поста — для слоя «фото в рамке»
+        self.boxes = {}                   # id слоя → (left, top, w, h): для текста «под слоем»
         self.notes = set()                # что пришлось сделать с текстом: title_cut, title_small
 
     def image(self, asset):
@@ -586,6 +608,11 @@ def apply_case(s, case):
     return s.upper() if case == "upper" else (s.lower() if case == "lower" else s)
 
 
+def clean_tag(s):
+    """Рубрика без решётки, «_» → пробел: #Vive_la_différence → Vive la différence."""
+    return (s or "").lstrip("#").replace("_", " ").strip()
+
+
 def text_content(L, ctx):
     src = L.get("source", "static")
     f = ctx.fields
@@ -595,6 +622,8 @@ def text_content(L, ctx):
         s = typograf(f.get("subtitle") or "")
     elif src == "hashtag":
         s = f.get("hashtag") or ""
+        if L.get("tag") == "clean":
+            s = clean_tag(s)
     elif src == "counter":
         n = int(f.get("n") or 0)
         s = (L.get("text") or "{i} / {n}").replace("{i}", str(f.get("i", 1))).replace("{n}", str(n)) if n > 1 else ""
@@ -610,82 +639,148 @@ def max_lines(L):
     return int(v)
 
 
+# ============ Выделение в тексте ============
+# «*слово*» в заголовке, подзаголовке или своём тексте рисуется стилем выделения слоя (L["em"]:
+# цвет, вес, шрифт). Жирный текст в подписи Telegram бот переводит в звёздочки сам.
+# «\*» — сама звёздочка; непарная звёздочка остаётся знаком.
+MARK = "*"
+
+
+def parse_marks(s):
+    """→ (текст без разметки, маска выделения по знакам)."""
+    toks, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s) and s[i + 1] == MARK:
+            toks.append((MARK, False)); i += 2
+            continue
+        toks.append((c, c == MARK)); i += 1
+    marks = [k for k, (_, m) in enumerate(toks) if m]
+    if len(marks) % 2:
+        toks[marks[-1]] = (MARK, False)
+    out, mask, em = [], [], False
+    for c, m in toks:
+        if m:
+            em = not em
+            continue
+        out.append(c); mask.append(em)
+    return "".join(out), mask
+
+
+class Styled:
+    """Два начертания слоя: основное и выделение. Без выделения — ровно как раньше."""
+
+    def __init__(self, L, size, customs):
+        key, weight = L.get("font", DEFAULT_FONT), L.get("weight", 400)
+        em = L.get("em") or {}
+        self.face = Face(key, weight, size, customs)
+        ekey, ew = em.get("font") or key, int(em.get("weight") or weight)
+        self.eface = self.face if (ekey, ew) == (key, weight) else Face(ekey, ew, size, customs)
+        self.size = self.face.size
+
+    def segs(self, s, mask):
+        out, start = [], 0
+        for k in range(1, len(s) + 1):
+            if k == len(s) or mask[k] != mask[start]:
+                out.append((s[start:k], mask[start]))
+                start = k
+        return out
+
+    def length(self, s, mask, ls):
+        if not s:
+            return 0.0
+        return sum((self.eface if e else self.face).length(t) for t, e in self.segs(s, mask)) + ls * (len(s) - 1)
+
+
+def wrap(text, mask, sf, ls, maxw):
+    """Строки как (текст, маска). Переносы — по пробелам и по «\\n» из подписи."""
+    out, pos = [], 0
+    for para in text.split("\n"):
+        pm = mask[pos:pos + len(para)]
+        pos += len(para) + 1
+        words, k = [], 0
+        for w in para.split(" "):
+            words.append((k, k + len(w)))
+            k += len(w) + 1
+        a = b = None
+        for ws, we in words:
+            if a is None:
+                a, b = ws, we
+                continue
+            if maxw > 0 and sf.length(para[a:we], pm[a:we], ls) > maxw:
+                out.append((para[a:b], pm[a:b]))
+                a = ws
+            b = we
+        out.append((para[a:b], pm[a:b]) if a is not None else ("", []))
+    return out
+
+
+def _truncate(lines, n, sf, ls, maxw):
+    keep = lines[:n]
+    s, m = keep[-1]
+    while maxw > 0 and " " in s and sf.length(s + ELLIPSIS, m + [False], ls) > maxw:
+        k = s.rfind(" ")
+        s, m = s[:k], m[:k]
+    k = len(s.rstrip(" ,;:—–-"))
+    keep[-1] = (s[:k] + ELLIPSIS, m[:k] + [bool(m[k - 1]) if k else False])
+    return keep
+
+
 def tracked_w(face, s, ls):
     return face.length(s) + ls * (len(s) - 1) if s else 0.0
 
 
-def wrap(text, face, ls, maxw):
-    out = []
-    for para in text.split("\n"):
-        line = ""
-        for w in para.split(" "):
-            cand = w if line == "" else line + " " + w
-            if line != "" and maxw > 0 and tracked_w(face, cand, ls) > maxw:
-                out.append(line)
-                line = w
-            else:
-                line = cand
-        out.append(line)
-    return out
-
-
-def _truncate(lines, n, face, ls, maxw):
-    keep = lines[:n]
-    last = keep[-1]
-    while maxw > 0 and " " in last and tracked_w(face, last + ELLIPSIS, ls) > maxw:
-        last = last.rsplit(" ", 1)[0]
-    keep[-1] = last.rstrip(" ,;:—–-") + ELLIPSIS
-    return keep
-
-
 def layout_text(L, ctx, content, W):
     """Строки, шрифт и габариты блока. Общая логика с webapp.html → layoutText."""
+    text, mask = parse_marks(content)
     size0 = float(L.get("size", 0.04)) * W
-    key, weight = L.get("font", DEFAULT_FONT), L.get("weight", 400)
     tr = float(L.get("tracking", 0))
     maxw = float(L.get("maxw", 0)) * W
     nmax = max_lines(L)
     size = size0
-    face = Face(key, weight, size, ctx.customs)
+    sf = Styled(L, size, ctx.customs)
     ls = tr * size
-    lines = wrap(content, face, ls, maxw)
+    lines = wrap(text, mask, sf, ls, maxw)
     small = cut = False
     if nmax > 0 and len(lines) > nmax:
         if maxw > 0:
             for k in range(1, SHRINK_STEPS + 1):
                 size = size0 * (1 - 0.05 * k)
-                face = Face(key, weight, size, ctx.customs)
+                sf = Styled(L, size, ctx.customs)
                 ls = tr * size
-                lines = wrap(content, face, ls, maxw)
+                lines = wrap(text, mask, sf, ls, maxw)
                 if len(lines) <= nmax:
                     break
             small = True
         if len(lines) > nmax:
-            lines = _truncate(lines, nmax, face, ls, maxw)
+            lines = _truncate(lines, nmax, sf, ls, maxw)
             cut = True
-    widest = max((tracked_w(face, ln, ls) for ln in lines), default=0)
+    widest = max((sf.length(s, m, ls) for s, m in lines), default=0)
     if maxw > 0 and widest > maxw:  # одно слово шире рамки — уменьшаем кегль
         size = size * maxw / widest
-        face = Face(key, weight, size, ctx.customs)
+        sf = Styled(L, size, ctx.customs)
         ls = tr * size
-        widest = max((tracked_w(face, ln, ls) for ln in lines), default=0)
-    font = face.font
+        widest = max((sf.length(s, m, ls) for s, m in lines), default=0)
+    font = sf.face.font
     cap = -font.getbbox("H", anchor="ls")[1]
     adv = float(L.get("leading", 1.1)) * size
-    return dict(lines=lines, face=face, font=font, ls=ls, size=size, cap=cap, adv=adv,
+    return dict(lines=lines, sf=sf, face=sf.face, font=font, ls=ls, size=size, cap=cap, adv=adv,
                 w=widest, h=cap + (len(lines) - 1) * adv, small=small, cut=cut)
 
 
-def _draw_line(d, face, ln, bx, by, ls, fill):
+def _draw_line(d, sf, line, bx, by, ls, fills):
+    s, mask = line
     x = bx
-    for text, font in face.runs(ln):
-        if ls == 0:
-            d.text((x, by), text, font=font, fill=fill, anchor="ls")
-            x += font.getlength(text)
-        else:
-            for ch in text:
-                d.text((x, by), ch, font=font, fill=fill, anchor="ls")
-                x += font.getlength(ch) + ls
+    for seg, em in sf.segs(s, mask):
+        face, fill = (sf.eface, fills[1]) if em else (sf.face, fills[0])
+        for text, font in face.runs(seg):
+            if ls == 0:
+                d.text((x, by), text, font=font, fill=fill, anchor="ls")
+                x += font.getlength(text)
+            else:
+                for ch in text:
+                    d.text((x, by), ch, font=font, fill=fill, anchor="ls")
+                    x += font.getlength(ch) + ls
 
 
 def draw_text_layer(canvas, L, ctx):
@@ -704,6 +799,9 @@ def draw_text_layer(canvas, L, ctx):
     pady = float(plate.get("pady", 0.5)) * m["size"] if plate else 0
     bw, bh = m["w"] + 2 * padx, m["h"] + 2 * pady
     left, top = place(L.get("anchor", "bl"), float(L.get("x", 0)), float(L.get("y", 0)), bw, bh, W, H)
+    prev = ctx.boxes.get(L.get("after")) if L.get("after") else None
+    if prev:   # поток: слой стоит под другим слоем, отступ — в долях ширины
+        top = prev[1] + prev[3] + float(L.get("gap", 0.02)) * W
     opacity = float(L.get("opacity", 1))
 
     if plate:
@@ -714,7 +812,10 @@ def draw_text_layer(canvas, L, ctx):
 
     tx, ty = left + padx, top + pady
     col = resolve_color(L.get("color"), ctx, canvas, (tx, ty, m["w"], m["h"])) or (255, 255, 255)
-    fill = col + (int(round(255 * opacity)),)
+    em = L.get("em") or {}
+    ecol = resolve_color(em["color"], ctx, canvas, (tx, ty, m["w"], m["h"])) if em.get("color") else None
+    a = int(round(255 * opacity))
+    fills = (col + (a,), (ecol or col) + (a,))
     shadow = L.get("shadow")
     blur = float(shadow.get("blur", 0.3)) * m["size"] if shadow else 0.0
     # Отдельный слой → корректное наложение полупрозрачного текста и тени
@@ -723,11 +824,11 @@ def draw_text_layer(canvas, L, ctx):
     lay = Image.new("RGBA", (int(m["w"]) + 2 * pad + 2, int(m["h"]) + 2 * pad + 2), (0, 0, 0, 0))
     d = ImageDraw.Draw(lay)
     align = L.get("align", "left")
-    face, ls = m["face"], m["ls"]
+    sf, ls = m["sf"], m["ls"]
     for i, ln in enumerate(m["lines"]):
-        lw = tracked_w(face, ln, ls)
+        lw = sf.length(ln[0], ln[1], ls)
         off = 0 if align == "left" else ((m["w"] - lw) / 2 if align == "center" else m["w"] - lw)
-        _draw_line(d, face, ln, tx + off - lx0, ty + m["cap"] + i * m["adv"] - ly0, ls, fill)
+        _draw_line(d, sf, ln, tx + off - lx0, ty + m["cap"] + i * m["adv"] - ly0, ls, fills)
     if shadow and blur > 0:
         sc = resolve_color(shadow.get("color"), ctx, canvas, (tx, ty, m["w"], m["h"])) or (0, 0, 0)
         sa = float(shadow.get("opacity", 0.5))
@@ -816,15 +917,20 @@ def draw_gradient_layer(canvas, L, ctx):
     W, H = canvas.size
     side = L.get("side", "bottom")
     vertical = side in ("bottom", "top")
-    ext = int(round(float(L.get("extent", 0.4)) * (H if vertical else W)))
-    ext = max(1, min(ext, H if vertical else W))
-    zone = {"bottom": (0, H - ext, W, ext), "top": (0, 0, W, ext),
-            "left": (0, 0, ext, H), "right": (W - ext, 0, ext, H)}[side]
+    D = H if vertical else W
+    st = int(round(float(L.get("start", 0)) * D))     # сплошная часть у края: градиент начинается дальше
+    ext = int(round(float(L.get("extent", 0.4)) * D))
+    ext = max(1, min(ext, D - st))
+    tot = st + ext
+    zone = {"bottom": (0, H - tot, W, tot), "top": (0, 0, W, tot),
+            "left": (0, 0, tot, H), "right": (W - tot, 0, tot, H)}[side]
     alpha = float(L.get("opacity", 0.6))
     if L.get("adaptive"):
         alpha *= 0.4 + 0.6 * luma(*avg_color(canvas, zone)) / 255
     alpha = max(0.0, min(0.99, alpha + ctx.dark))
     ramp = gradient_ramp(ext, alpha)                 # ramp[0] — у края кадра
+    if st:
+        ramp = np.concatenate([np.full(st, 255.0 * alpha), ramp])
     if vertical:
         band = np.repeat(ramp[:, None], W, axis=1)
         if side == "bottom":
@@ -886,7 +992,29 @@ def draw_image_layer(canvas, L, ctx):
     return (left, top, piece.width, piece.height)
 
 
-DRAW = {"text": draw_text_layer, "logo": draw_logo_layer, "rect": draw_rect_layer,
+def draw_photo_layer(canvas, L, ctx):
+    """Фото поста в рамке: прямоугольник (или поля от края), скругление, своя точка
+    фокуса и масштаб. Если в кадре есть такой слой, фон кадра — цвет слоя (bg)."""
+    if ctx.photo is None:
+        return None
+    W, H = canvas.size
+    left, top, w, h = rect_box(L, W, H)
+    bw, bh = int(round(w)), int(round(h))
+    if bw < 2 or bh < 2:
+        return None
+    focus = (float(L["fx"]), float(L["fy"])) if "fx" in L and "fy" in L else ctx.focus
+    zoom = float(L.get("zoom", 1)) * float(ctx.zoom or 1)
+    piece = fit_cover(ctx.photo, bw, bh, focus, zoom).convert("RGBA")
+    a = int(round(255 * float(L.get("opacity", 1))))
+    radius = float(L.get("radius", 0)) * min(bw, bh) / 2
+    mask = _rounded_layer((bw, bh), (0, 0, bw - 1, bh - 1), radius, (0, 0, 0, a)).split()[3] if (radius > 0 or a < 255) else None
+    if mask is not None:
+        piece.putalpha(mask)
+    over(canvas, piece, int(round(left)), int(round(top)))
+    return (left, top, w, h)
+
+
+DRAW = {"photo": draw_photo_layer, "text": draw_text_layer, "logo": draw_logo_layer, "rect": draw_rect_layer,
         "gradient": draw_gradient_layer, "overlay": draw_overlay_layer, "image": draw_image_layer}
 
 
@@ -896,16 +1024,41 @@ def on_slide(L, i):
     return i <= 1 if s == "first" else (i > 1 if s == "rest" else True)
 
 
+def frame_layer(layers, i):
+    """Первый видимый слой «фото в рамке» на кадре i или None."""
+    for L in layers or []:
+        if L.get("type") == "photo" and not L.get("hidden") and on_slide(L, i):
+            return L
+    return None
+
+
+def photo_box(layers, W, H, i=1):
+    """Куда ляжет фото на кадре i: размер рамки или всего кадра — для подсказки об обрезке."""
+    L = frame_layer(layers, i)
+    if not L:
+        return W, H
+    _, _, w, h = rect_box(L, W, H)
+    return max(1, int(round(w))), max(1, int(round(h)))
+
+
 def render_surface(photo, W, H, layers, ctx) -> Image.Image:
-    canvas = fit_cover(photo, W, H, ctx.focus).convert("RGBA")
     i = int(ctx.fields.get("i") or 1)
+    ctx.photo, ctx.boxes = photo, {}
+    frame = frame_layer(layers, i)
+    if frame:   # фото в рамке: под ним — фон кадра
+        bg = ctx.ref((frame.get("bg") or {}).get("value", "p0") if isinstance(frame.get("bg"), dict) else "p0")
+        canvas = Image.new("RGBA", (W, H), bg + (255,))
+    else:
+        canvas = fit_cover(photo, W, H, ctx.focus, ctx.zoom).convert("RGBA")
     for L in layers or []:
         if L.get("hidden") or not on_slide(L, i):
             continue
         fn = DRAW.get(L.get("type"))
         if fn:
             try:
-                fn(canvas, L, ctx)
+                box = fn(canvas, L, ctx)
+                if box and L.get("id"):
+                    ctx.boxes[L["id"]] = box
             except Exception as e:
                 logger.exception("слой %s: %s", L.get("type"), e)
     return canvas.convert("RGB")
@@ -915,6 +1068,7 @@ def render_surface(photo, W, H, layers, ctx) -> Image.Image:
 FEED_SIZES = {
     "4:5": (1920, 2400), "3:4": (1920, 2560), "1:1": (1920, 1920),
     "3:2": (1920, 1280), "9:16": (1080, 1920),
+    "16:9": (1920, 1080), "1.91:1": (1920, 1005),     # превью ссылки, X, Facebook
 }
 STORY_SIZE = (1080, 1920)
 DARK_STEPS = [-0.4, -0.2, 0.0, 0.2, 0.4]
