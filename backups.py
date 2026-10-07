@@ -10,8 +10,12 @@ VK Cloud. Переменные окружения:
   BACKUP_S3_PREFIX    папка внутри бакета, по умолчанию numbus/
 
 Подпись запросов — AWS Signature V4, без сторонних библиотек.
+Здесь же — чтение настроек из окружения без падений: пустое или кривое значение
+(«BACKUP_HOUR=», «BACKUP_HOUR=04:00», «BACKUP_S3_REGION=») не роняет бота, а берётся
+значение по умолчанию с предупреждением в логе.
 """
 import os
+import re
 import hmac
 import hashlib
 import logging
@@ -22,15 +26,78 @@ from urllib.parse import quote, urlparse
 logger = logging.getLogger("numbus.backup")
 
 
+# ============ Настройки из окружения ============
+def env_str(name, default=""):
+    """Строка из окружения; пустая (или из одних пробелов) — значение по умолчанию."""
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    v = v.strip()
+    if not v:
+        if default:
+            logger.warning("%s задана пустой — беру %r", name, default)
+        return default
+    return v
+
+
+def env_int(name, default, lo=None, hi=None):
+    """Целое из окружения. Пусто, не число или вне [lo, hi] — default и предупреждение."""
+    raw = env_str(name, "")
+    if not raw:
+        if name in os.environ:
+            logger.warning("%s задана пустой — беру %s", name, default)
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        logger.warning("%s=%r — не целое число, беру %s", name, raw, default)
+        return default
+    if (lo is not None and v < lo) or (hi is not None and v > hi):
+        logger.warning("%s=%s — вне допустимого (%s…%s), беру %s", name, v, lo, hi, default)
+        return default
+    return v
+
+
+def env_bool(name, default=False):
+    raw = env_str(name, "").lower()
+    if not raw:
+        if name in os.environ:
+            logger.warning("%s задана пустой — беру %s", name, default)
+        return default
+    if raw in ("1", "true", "yes", "on", "да"):
+        return True
+    if raw in ("0", "false", "no", "off", "нет"):
+        return False
+    logger.warning("%s=%r — ожидается true или false, беру %s", name, raw, default)
+    return default
+
+
+def backup_hour(default=4):
+    """Час ежедневной копии из BACKUP_HOUR: «4», «04» и «04:00» — это 4 часа.
+    Пусто или ерунда — default (4) и предупреждение в логе."""
+    raw = env_str("BACKUP_HOUR", "")
+    if not raw:
+        if "BACKUP_HOUR" in os.environ:
+            logger.warning("BACKUP_HOUR задана пустой — беру %s", default)
+        return default
+    m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?(?:\s*[чh])?", raw, re.I)
+    if not m or int(m.group(1)) > 23:
+        logger.warning("BACKUP_HOUR=%r — нужен час 0–23, например 4. Беру %s", raw, default)
+        return default
+    if m.group(2) and m.group(2) != "00":
+        logger.warning("BACKUP_HOUR=%r — минуты не учитываются, копия в %s:10", raw, int(m.group(1)))
+    return int(m.group(1))
+
+
 def s3_config():
-    cfg = {k: os.environ.get("BACKUP_S3_" + k.upper()) for k in ("endpoint", "bucket", "key", "secret")}
+    cfg = {k: env_str("BACKUP_S3_" + k.upper()) for k in ("endpoint", "bucket", "key", "secret")}
     if not all(cfg.values()):
         return None
     cfg["endpoint"] = cfg["endpoint"].rstrip("/")
     if not cfg["endpoint"].startswith("http"):
         cfg["endpoint"] = "https://" + cfg["endpoint"]
-    cfg["region"] = os.environ.get("BACKUP_S3_REGION", "ru-1")
-    cfg["prefix"] = os.environ.get("BACKUP_S3_PREFIX", "numbus/")
+    cfg["region"] = env_str("BACKUP_S3_REGION", "ru-1")
+    cfg["prefix"] = env_str("BACKUP_S3_PREFIX", "numbus/")
     return cfg
 
 

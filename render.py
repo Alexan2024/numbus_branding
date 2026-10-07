@@ -295,36 +295,74 @@ def to_srgb(img):
 
 # ============ Картинки ============
 # 200-Мп снимки с телефонов открываются: JPEG декодируется сразу уменьшенным (draft),
-# а остальные форматы больше MAX_PIXELS не принимаются — иначе не хватит памяти.
+# остальные форматы (HEIC, PNG) уменьшаются сразу после декодирования — до поворота
+# по EXIF и перевода в sRGB, чтобы в памяти не жили копии полного размера.
+# Фото больше MAX_PIXELS не принимаются. Логотипы, графика и макеты — не больше
+# ASSET_MAX_PIXELS: 98-КБ PNG 10000×10000 иначе занимает гигабайт памяти.
 Image.MAX_IMAGE_PIXELS = 260_000_000
 MAX_PIXELS = 100_000_000
+ASSET_MAX_PIXELS = 25_000_000
 PHOTO_SHORT = 2560     # короткой стороны фото с запасом хватает на любой формат вывода
 
 
 class TooBig(ValueError):
-    """Картинка больше MAX_PIXELS: не открываем, чтобы не съесть память сервера."""
+    """Картинка больше допустимого: не открываем, чтобы не съесть память сервера."""
 
 
-def open_image(data: bytes, short: int = None) -> Image.Image:
+# Поворот по EXIF — те же правила, что в ImageOps.exif_transpose
+_ORIENT = {2: Image.Transpose.FLIP_LEFT_RIGHT, 3: Image.Transpose.ROTATE_180, 4: Image.Transpose.FLIP_TOP_BOTTOM,
+           5: Image.Transpose.TRANSPOSE, 6: Image.Transpose.ROTATE_270, 7: Image.Transpose.TRANSVERSE,
+           8: Image.Transpose.ROTATE_90}
+
+
+def _orientation(img):
+    try:
+        return int(img.getexif().get(0x0112) or 1)
+    except Exception:
+        return 1
+
+
+def _reduce(img, k):
+    """Уменьшение в k раз сразу после декодирования (box-фильтр). Профиль и EXIF сохраняются."""
+    if img.mode in ("P", "PA"):
+        img = img.convert("RGBA" if img.mode == "PA" or "transparency" in img.info else "RGB")
+    elif img.mode == "1":
+        img = img.convert("L")
+    elif img.mode.startswith("I;16"):
+        img = img.convert("I")
+    return img.reduce(k)
+
+
+def open_image(data: bytes, short: int = None, max_pixels: int = None) -> Image.Image:
+    """short — фото: короткая сторона уменьшается до short…2·short сразу при декодировании.
+    Без short — логотип, графика, макет: больше ASSET_MAX_PIXELS не открываем (TooBig)."""
     img = Image.open(io.BytesIO(data))
     W, H = img.size
+    limit = max_pixels or (MAX_PIXELS if short else ASSET_MAX_PIXELS)
     # MPO — тот же JPEG (так сохраняют Samsung и iPhone с HDR), draft работает и для него
     if short and img.format in ("JPEG", "MPO"):
         s = next((a for a in (8, 4, 2) if min(W, H) // a >= short), 1)
         if s > 1:
             img.draft(img.mode, (W // s, H // s))
-    if img.size[0] * img.size[1] > MAX_PIXELS:
+    if img.size[0] * img.size[1] > limit:
         raise TooBig(f"image too big: {W}x{H}")
-    img = ImageOps.exif_transpose(img)
+    if short and min(img.size) // short >= 2:
+        # HEIC и PNG декодируются целиком: сразу уменьшаем, поворачиваем уже маленькую копию.
+        # Ориентацию читаем после декодирования: TIFF (libtiff) и HEIC поворачиваются сами при load()
+        img.load()
+        orient = _orientation(img)
+        img = _reduce(img, min(img.size) // short)
+        if _orientation(img) == orient:          # EXIF переехал в копию (JPEG, HEIC, PNG)
+            img = ImageOps.exif_transpose(img)
+        elif orient in _ORIENT:                  # ориентация жила в тегах файла (TIFF)
+            img = img.transpose(_ORIENT[orient])
+    else:
+        img = ImageOps.exif_transpose(img)
     return to_srgb(img)
 
 
 def open_photo(data: bytes) -> Image.Image:
     return open_image(data, PHOTO_SHORT).convert("RGB")
-
-
-_SVG_IMG = re.compile(rb"<image\b[^>]*>", re.I)
-_SVG_DANGER = re.compile(rb"<!DOCTYPE[^>]*(\[[\s\S]*?\])?\s*>|<script\b[\s\S]*?</script>", re.I)
 
 
 _RASTER_SIGS = (b"\x89PNG", b"\xff\xd8", b"GIF8", b"RIFF", b"BM", b"II*\x00", b"MM\x00*")
@@ -342,49 +380,284 @@ def is_pdf(data: bytes) -> bool:
     return not data.startswith(_RASTER_SIGS) and b"%PDF-" in data[:1024]
 
 
-def _svg_size(data):
-    txt = data[:65536].decode("utf-8", "ignore")
-    m = re.search(r"<svg\b[^>]*>", txt, re.I | re.S)
-    tag = m.group(0) if m else ""
-    vb = re.search(r"viewBox\s*=\s*[\"']\s*([-\d.eE]+)[\s,]+([-\d.eE]+)[\s,]+([\d.eE]+)[\s,]+([\d.eE]+)", tag)
-    if vb:
-        return float(vb.group(3)), float(vb.group(4))
-    w = re.search(r"\bwidth\s*=\s*[\"']\s*([\d.]+)", tag)
-    h = re.search(r"\bheight\s*=\s*[\"']\s*([\d.]+)", tag)
+# ============ Векторные логотипы ============
+# SVG разбирается как XML и чистится до растрирования. Логотипу не нужны внешние файлы,
+# сетевые адреса, скрипты и фильтр feImage, а на сервере через них читаются чужие файлы
+# (<image href="/data/…">), и /dev/zero съедает память. Разрешены только ссылки внутри
+# файла (#id) и встроенные растровые картинки data:image/png|jpeg|webp|gif;base64.
+# DOCTYPE убирается; из него берутся только простые внутренние сущности (так сохраняет
+# Illustrator), внешние и вложенные сущности — отказ. Растр — не больше VECTOR_MAX_SIDE
+# по каждой стороне.
+SVG_NS = "http://www.w3.org/2000/svg"
+_XML_NS = "http://www.w3.org/XML/1998/namespace"
+VECTOR_MAX_SIDE = 2000
+SVG_MAX_BYTES = 8_000_000
+SVG_MAX_ELEMENTS = 50_000
+SVG_MAX_DEPTH = 200
+LOGO_MAX_ASPECT = 16            # длиннее 1:16 логотип на посте превращается в нечитаемую нитку
+_SVG_DROP = {"script", "foreignobject", "feimage", "iframe", "object", "embed", "audio", "video", "canvas",
+             "handler", "listener", "animate", "animatemotion", "animatetransform", "animatecolor", "set",
+             "discard", "link", "meta", "filter"}   # filter: feGaussianBlur/feTurbulence с огромными
+                                                        # параметрами — минуты CPU и гигабайты памяти
+_XML_DECL = re.compile(r"^\s*<\?xml.*?\?>", re.S)
+_XML_ENC = re.compile(r"""encoding\s*=\s*["']([A-Za-z0-9._-]+)["']""")
+_ENTITY_DECL = re.compile(r"""<!ENTITY\s+([A-Za-z_][\w.-]*)\s+(?:"([^"]*)"|'([^']*)')\s*>""")
+_ENTITY_REF = re.compile(r"&([A-Za-z_][\w.-]*);")
+_XML_PREDEF = {"amp", "lt", "gt", "quot", "apos"}
+_CSS_URL = re.compile(r"""url\(\s*(['"]?)(.*?)\1\s*\)""", re.I | re.S)
+_CSS_IMPORT = re.compile(r"@import[^;]*;?", re.I)
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_DATA_RASTER = re.compile(r"data:image/(png|jpe?g|webp|gif);base64,", re.I)
+_SVG_LEN = re.compile(r"^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*(px|pt|pc|mm|cm|in|em|ex|%)?\s*$", re.I)
+_SVG_UNIT = {"": 1.0, "px": 1.0, "pt": 4 / 3, "pc": 16.0, "mm": 96 / 25.4, "cm": 96 / 2.54, "in": 96.0,
+             "em": 16.0, "ex": 8.0}
+
+
+class BadVector(Exception):
+    """SVG или PDF не растрируется: ошибка разбора, внешние сущности, слишком вытянутый.
+    Не ValueError: бот и редактор отвечают на неё «не получилось открыть логотип»."""
+
+
+def _local(tag):
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _nsuri(tag):
+    return tag[1:].split("}", 1)[0] if isinstance(tag, str) and tag.startswith("{") else ""
+
+
+def _svg_text(data):
+    """Байты → текст без BOM и объявления XML (кодировка — из объявления, иначе UTF-8)."""
+    if len(data) > SVG_MAX_BYTES:
+        raise BadVector("svg too large")
+    head = data[:300].decode("ascii", "ignore").lstrip(" \t\r\n")
+    m = _XML_ENC.search(head.split("?>")[0]) if head.startswith("<?xml") else None
+    enc = m.group(1).lower() if m else "utf-8"
+    if "16" in enc or "32" in enc:      # is_svg уже увидел «<svg» как ASCII — значит, файл не UTF-16
+        enc = "utf-8"
+    try:
+        txt = data.decode(enc, "replace")
+    except LookupError:
+        txt = data.decode("utf-8", "replace")
+    return _XML_DECL.sub("", txt.lstrip("﻿"), count=1)
+
+
+def _svg_doctype(txt):
+    """Убирает DOCTYPE и подставляет простые внутренние сущности → текст без DTD."""
+    m = re.search(r"<!DOCTYPE", txt, re.I)
+    if not m:
+        if re.search(r"<!ENTITY", txt, re.I):
+            raise BadVector("entity outside doctype")
+        return txt
+    i, n, quote, in_sub, sub0, sub1, end = m.end(), len(txt), None, False, None, None, None
+    while i < n:
+        c = txt[i]
+        if quote:
+            if c == quote:
+                quote = None
+        elif in_sub and txt.startswith("<!--", i):
+            j = txt.find("-->", i + 4)
+            if j < 0:
+                break
+            i = j + 3
+            continue
+        elif c in "\"'":
+            quote = c
+        elif c == "[" and sub0 is None:
+            in_sub, sub0 = True, i + 1
+        elif c == "]" and in_sub:
+            in_sub, sub1 = False, i
+        elif c == ">" and not in_sub:
+            end = i + 1
+            break
+        i += 1
+    if end is None:
+        raise BadVector("doctype")
+    subset = re.sub(r"<!--.*?-->", "", txt[sub0:sub1], flags=re.S) if sub0 is not None else ""
+    ents = {}
+
+    def take(e):
+        name, val = e.group(1), e.group(2) if e.group(2) is not None else e.group(3)
+        if name in _XML_PREDEF or name in ents or len(ents) >= 64 or len(val) > 1024 or any(ch in val for ch in "&%<"):
+            raise BadVector("entity")
+        ents[name] = val.replace('"', "&quot;").replace("'", "&apos;")
+        return ""
+
+    if _ENTITY_DECL.sub(take, subset).strip():
+        raise BadVector("dtd")          # параметрические и внешние сущности, ATTLIST, ELEMENT
+    body = txt[:m.start()] + txt[end:]
+    if re.search(r"<!(DOCTYPE|ENTITY)", body, re.I):
+        raise BadVector("doctype")
+    if ents:
+        total = len(body)
+        for r in _ENTITY_REF.finditer(body):
+            if r.group(1) in ents:
+                total += len(ents[r.group(1)]) - len(r.group(0))
+                if total > 2 * SVG_MAX_BYTES:
+                    raise BadVector("entities")
+        body = _ENTITY_REF.sub(lambda r: ents.get(r.group(1), r.group(0)), body)
+    return body
+
+
+def _clean_css(s):
+    """url(…) только на элементы внутри файла (url(#id)); @import и экранирование — прочь."""
+    s = _CSS_COMMENT.sub("", s.replace("\\", ""))
+    s = _CSS_IMPORT.sub("", s)
+    s = re.sub(r"filter\s*:[^;}]*;?", "", s, flags=re.I)
+    return _CSS_URL.sub(lambda u: u.group(0) if u.group(2).strip().startswith("#") else "none", s)
+
+
+def _data_raster_ok(uri, budget):
+    """Встроенная PNG/JPEG/WebP/GIF-картинка. Огромная — TooBig, битая — False."""
+    m = _DATA_RASTER.match(uri)
+    if not m:
+        return False
+    try:
+        import base64
+        raw = base64.b64decode(re.sub(r"\s+", "", uri[m.end():]))
+        im = Image.open(io.BytesIO(raw))
+        w, h = im.size
+        fmt = im.format
+    except Exception:
+        return False
+    if fmt not in ("PNG", "JPEG", "MPO", "WEBP", "GIF"):
+        return False
+    budget[0] -= w * h
+    if w * h > ASSET_MAX_PIXELS or budget[0] < 0:
+        raise TooBig(f"embedded image {w}x{h}")
+    return True
+
+
+def _clean_attrs(el, name, budget, keep=False):
+    """Чистит атрибуты элемента. False — элемент ссылается наружу и должен быть удалён
+    (keep=True — корень и ссылки <a>: убирается только сам атрибут)."""
+    for k in list(el.attrib):
+        ln = _local(k).lower()
+        v = el.attrib[k]
+        if ln.startswith("on") or ln == "filter" or (ln == "base" and _nsuri(k) == _XML_NS):
+            del el.attrib[k]           # обработчики событий, xml:base
+            continue
+        if ln == "href":               # href и xlink:href — в любом пространстве имён
+            s = v.strip()
+            if s.startswith("#") or (name == "image" and _data_raster_ok(s, budget)):
+                continue
+            if keep or name == "a":
+                del el.attrib[k]
+                continue
+            return False
+        if "(" in v or "\\" in v:
+            el.attrib[k] = _clean_css(v)
+    return True
+
+
+def _svg_len(v):
+    m = _SVG_LEN.match(v or "")
+    if not m or (m.group(2) or "") == "%":
+        return None
+    x = float(m.group(1)) * _SVG_UNIT[(m.group(2) or "").lower()]
+    return x if 0 < x < 1e9 else None
+
+
+def svg_size(root):
+    """Собственный размер SVG (w, h) в px: width/height с единицами, иначе viewBox. None — неизвестен."""
+    vb = None
+    parts = [p for p in re.split(r"[\s,]+", (root.get("viewBox") or "").strip()) if p]
+    if len(parts) == 4:
+        try:
+            nums = [float(p) for p in parts]
+            if 0 < nums[2] < 1e9 and 0 < nums[3] < 1e9:
+                vb = nums[2], nums[3]
+        except ValueError:
+            pass
+    w, h = _svg_len(root.get("width")), _svg_len(root.get("height"))
     if w and h:
-        return float(w.group(1)), float(h.group(1))
+        return w, h
+    if vb:
+        if w:
+            return w, w * vb[1] / vb[0]
+        if h:
+            return h * vb[0] / vb[1], h
+        return vb
     return None
 
 
-def rasterize_vector(data: bytes, max_side=2000) -> Image.Image:
-    """Логотип в SVG или PDF (первая страница) → RGBA на прозрачном фоне."""
+def sanitize_svg(data: bytes):
+    """SVG → (чистый текст SVG, собственный размер или None). Нельзя разобрать — BadVector."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(_svg_doctype(_svg_text(data)))
+    except ET.ParseError as e:
+        raise BadVector(f"svg: {e}") from None
+    if _local(root.tag) != "svg":
+        raise BadVector("not svg")
+    bare = _nsuri(root.tag) == ""      # файл без xmlns: считаем все элементы SVG
+    if bare:
+        root.tag = "{%s}svg" % SVG_NS
+    budget = [2 * ASSET_MAX_PIXELS]    # встроенные картинки — в сумме
+    _clean_attrs(root, "svg", budget, keep=True)
+    count, stack = 0, [(root, 0)]
+    while stack:
+        el, depth = stack.pop()
+        count += 1
+        if count > SVG_MAX_ELEMENTS or depth > SVG_MAX_DEPTH:
+            raise BadVector("svg too complex")
+        if _local(el.tag) == "style":
+            el.text = _clean_css(el.text or "")
+            for ch in list(el):
+                el.remove(ch)
+            continue
+        for ch in list(el):
+            if bare and isinstance(ch.tag, str) and _nsuri(ch.tag) == "":
+                ch.tag = "{%s}%s" % (SVG_NS, ch.tag)
+            name = _local(ch.tag).lower()
+            # чужие пространства имён (метаданные Illustrator, Inkscape, XHTML) рендеру не нужны
+            if _nsuri(ch.tag) != SVG_NS or name in _SVG_DROP or not _clean_attrs(ch, name, budget):
+                el.remove(ch)
+                continue
+            stack.append((ch, depth + 1))
+    try:
+        text = ET.tostring(root, encoding="unicode")   # префикс ns0: resvg понимает пространства имён
+    except (ValueError, RecursionError) as e:
+        raise BadVector(f"svg: {e}") from None
+    return text, svg_size(root)
+
+
+def _check_aspect(w, h):
+    if min(w, h) <= 0 or max(w, h) / min(w, h) > LOGO_MAX_ASPECT:
+        raise BadVector(f"logo aspect {w}x{h}")
+
+
+def rasterize_vector(data: bytes, max_side=VECTOR_MAX_SIDE) -> Image.Image:
+    """Логотип в SVG или PDF (первая страница) → RGBA на прозрачном фоне, стороны ≤ max_side."""
     if is_svg(data):
         import resvg_py
-        # Внешние картинки и скрипты не нужны логотипу и небезопасны на сервере
-        clean = _SVG_DANGER.sub(b"", data)
-        clean = _SVG_IMG.sub(lambda m: m.group(0) if b"data:" in m.group(0).lower() else b"", clean)
-        size = _svg_size(clean)
-        kw = {}
-        if size and size[0] > 0 and size[1] > 0:
-            if size[0] >= size[1]:
-                kw["width"] = max_side
-            else:
-                kw["height"] = max_side
-        else:
-            kw["width"] = max_side
+        clean, size = sanitize_svg(data)
+        if size:
+            _check_aspect(*size)
         with tempfile.TemporaryDirectory() as empty:
-            png = resvg_py.svg_to_bytes(svg_string=clean.decode("utf-8", "replace"), resources_dir=empty, **kw)
-        return Image.open(io.BytesIO(bytes(png))).convert("RGBA")
-    import pypdfium2 as pdfium
-    pdf = pdfium.PdfDocument(data)
-    try:
-        page = pdf[0]
-        w, h = page.get_size()
-        scale = max_side / max(w, h, 1)
-        bmp = page.render(scale=scale, fill_color=(0, 0, 0, 0), may_draw_forms=True, rev_byteorder=True)
-        return bmp.to_pil().convert("RGBA")
-    finally:
-        pdf.close()
+            try:   # ширина и высота вместе — вписать в квадрат max_side: ни одна сторона не больше;
+                # dpi=96 — как в браузере: иначе размеры в mm/pt/in (Inkscape, Illustrator) — «invalid size»
+                png = resvg_py.svg_to_bytes(svg_string=clean, resources_dir=empty, width=max_side, height=max_side,
+                                            dpi=96)
+            except ValueError as e:
+                raise BadVector(f"svg: {e}") from None
+        img = Image.open(io.BytesIO(bytes(png)))
+    else:
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(data)
+        try:
+            page = pdf[0]
+            w, h = page.get_size()
+            _check_aspect(w, h)
+            scale = max_side / max(w, h, 1)
+            bmp = page.render(scale=scale, fill_color=(0, 0, 0, 0), may_draw_forms=True, rev_byteorder=True)
+            img = bmp.to_pil()
+        finally:
+            pdf.close()
+    if max(img.size) > max_side + 1:
+        raise BadVector(f"raster {img.size}")
+    _check_aspect(*img.size)
+    return img.convert("RGBA")
 
 
 def prepare_logo(data: bytes):
@@ -394,12 +667,20 @@ def prepare_logo(data: bytes):
     if is_svg(data) or is_pdf(data):
         img = rasterize_vector(data)
     else:
-        img = open_image(data).convert("RGBA")
+        img = open_image(data)
+        if img.mode not in ("RGB", "RGBA", "L", "LA"):
+            img = img.convert("RGBA")
+        if max(img.size) > 3000:          # уменьшаем до перевода в RGBA: меньше копий в памяти
+            img.thumbnail((3000, 3000), Image.LANCZOS)
+        img = img.convert("RGBA")
     if max(img.size) > 3000:
         img.thumbnail((3000, 3000), Image.LANCZOS)
     arr = np.array(img)
     alpha = arr[:, :, 3]
-    had_alpha = bool((alpha < 10).mean() > 0.01)
+    # Своей прозрачности верим, если она вообще есть: у скруглённой плашки прозрачны
+    # только уголки (0,3% пикселей), и убирать «фон» по углам у неё нельзя
+    corners = (alpha[0, 0], alpha[0, -1], alpha[-1, 0], alpha[-1, -1])
+    had_alpha = bool((alpha < 250).mean() >= 0.0005 or min(corners) < 10)
     if not had_alpha:
         gray = arr[:, :, :3].astype(np.float32) @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
         h, w = gray.shape
@@ -443,6 +724,39 @@ def logo_colors(png: bytes, k=3):
             continue
         found.append(rgb)
     return ["#%02X%02X%02X" % c for c in found[:k]]
+
+
+MULTITONE_EDGE = 0.2     # доля внутренних границ от длины контура, начиная с которой логотип «многоцветный»
+
+
+def logo_is_multitone(png) -> bool:
+    """Логотип, который нельзя перекрашивать в один цвет: внутри непрозрачной части есть
+    свой рисунок — белые буквы на красной плашке, круглая аватарка с надписью, фото.
+    Считаем резкие границы цвета внутри логотипа (не по краю прозрачности) и сравниваем
+    с длиной контура. У надписи и знака на прозрачном фоне таких границ нет, даже если
+    частей несколько и они разного цвета: перекраска сохраняет их форму.
+    Стартовые стили ставят таким логотипам «цвета файла» (spec.brand_traits → spec.fit_brand)."""
+    if not png:
+        return False
+    try:
+        img = Image.open(io.BytesIO(png)).convert("RGBA")
+    except Exception:
+        return False
+    img.thumbnail((400, 400), Image.LANCZOS)
+    arr = np.asarray(img).astype(np.int16)
+    solid = arr[:, :, 3] >= 200
+    if solid.sum() < 200:
+        return False
+    # внутренняя часть: непрозрачно и вокруг на 2 px — тоже (сглаженный край не в счёт)
+    inner = np.asarray(Image.fromarray(solid.astype(np.uint8) * 255).filter(ImageFilter.MinFilter(5))) > 0
+    rgb = arr[:, :, :3]
+    step = np.zeros(solid.shape, dtype=bool)                 # резкий перепад цвета на 2 px
+    step[:, 1:-1] |= np.abs(rgb[:, 2:] - rgb[:, :-2]).max(-1) >= 60
+    step[1:-1, :] |= np.abs(rgb[2:] - rgb[:-2]).max(-1) >= 60
+    inner_edges = int((step & inner).sum())
+    contour = int((solid & ~np.asarray(Image.fromarray(solid.astype(np.uint8) * 255)
+                                       .filter(ImageFilter.MinFilter(3)))).sum())
+    return inner_edges >= MULTITONE_EDGE * max(contour, 1)
 
 
 def sample_image(w=1600, h=2000) -> Image.Image:

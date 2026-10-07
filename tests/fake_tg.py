@@ -97,7 +97,9 @@ class FakeTG:
             if asyncio.iscoroutine(result):
                 result = await result
         except TgError as e:
-            return web.json_response({"ok": False, "error_code": 400, "description": "Bad Request: " + str(e)})
+            # как настоящий Telegram: ошибка — HTTP 400, и PTB поднимает BadRequest
+            return web.json_response({"ok": False, "error_code": 400, "description": "Bad Request: " + str(e)},
+                                     status=400)
         return web.json_response({"ok": True, "result": result})
 
     # ---- сообщения ----

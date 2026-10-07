@@ -19,14 +19,32 @@ logger = logging.getLogger(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 
+def _on_disk(d) -> bool:
+    """Папка лежит на подключённом диске (Railway Volume, том docker-compose)?
+    Папка внутри контейнера пропадает при деплое — даже если её указали в DATA_DIR."""
+    if not d:
+        return False
+    p = os.path.realpath(d)
+    vol = (os.environ.get("RAILWAY_VOLUME_MOUNT_PATH") or "").strip()
+    if vol:
+        v = os.path.realpath(vol)
+        if p == v or p.startswith(v.rstrip(os.sep) + os.sep):
+            return True
+    while p != os.path.dirname(p):          # сама папка или её родитель — точка монтирования;
+        if os.path.ismount(p):              # корень «/» есть всегда и диском не считается
+            return True
+        p = os.path.dirname(p)
+    return False
+
+
 def _resolve_data_dir():
     """DATA_DIR из окружения, иначе Railway Volume (RAILWAY_VOLUME_MOUNT_PATH),
-    иначе /data, иначе папка рядом с ботом (эфемерно). /data считается постоянной,
-    только если это подключённый диск: папка внутри контейнера пропадёт при деплое."""
-    explicit = os.environ.get("DATA_DIR")
-    vol = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
-    candidates = ([(explicit, True)] if explicit else []) + ([(vol, True)] if vol else []) + \
-        [("/data", os.path.ismount("/data")), (os.path.join(BASE, "data"), False)]
+    иначе /data, иначе папка рядом с ботом (эфемерно). Постоянной папка считается,
+    только если она на подключённом диске — как бы её ни задали."""
+    explicit = (os.environ.get("DATA_DIR") or "").strip()
+    vol = (os.environ.get("RAILWAY_VOLUME_MOUNT_PATH") or "").strip()
+    candidates = ([explicit] if explicit else []) + ([vol] if vol else []) + ["/data", os.path.join(BASE, "data")]
+    candidates = [(d, _on_disk(d) if d != os.path.join(BASE, "data") else False) for d in candidates]
     for d, persistent in candidates:
         try:
             os.makedirs(d, exist_ok=True)
@@ -182,6 +200,7 @@ MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN last_seen TEXT",
     "ALTER TABLE members ADD COLUMN joined_at TEXT",
     "ALTER TABLE brands ADD COLUMN period_anchor TEXT",    # начало подписки: от него считаются 30-дневные периоды
+    "ALTER TABLE assets ADD COLUMN created_at TEXT",       # когда загружен: свежую графику уборка не трогает
 ]
 
 
@@ -202,6 +221,8 @@ def init_db():
             except sqlite3.OperationalError:
                 pass   # колонка уже есть
         c.execute("UPDATE brands SET period_anchor=created_at WHERE period_anchor IS NULL")
+        # Файлы, загруженные до появления даты, считаем загруженными сейчас: уборка тронет их не раньше чем через сутки
+        c.execute("UPDATE assets SET created_at=? WHERE created_at IS NULL", (_now().isoformat(),))
         # Сессии раньше хранились открытым текстом — заменяем на хэш (вход сохраняется)
         for r in c.execute("SELECT token FROM sessions").fetchall():
             tok = r["token"]
@@ -216,7 +237,9 @@ def ensure_user(tg_id: int, lang_hint: str = None) -> dict:
         row = c.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
         if row:
             return dict(row)
-        lang = "ru" if (lang_hint or "").lower().startswith(("ru", "uk", "be", "kk")) else "en"
+        # Пилот русскоязычный: английский — только если Telegram прямо говорит «en»,
+        # неизвестный или пустой язык — русский
+        lang = "en" if (lang_hint or "").strip().lower().startswith("en") else "ru"
         c.execute("INSERT INTO users (tg_id, lang, active_brand, created_at) VALUES (?,?,?,?)",
                   (tg_id, lang, None, _now().isoformat()))
         return {"tg_id": tg_id, "lang": lang, "active_brand": None}
@@ -490,8 +513,8 @@ def delete_user(tg_id: int) -> list:
 # ============ Ассеты (логотипы, шрифт, фото-образец) ============
 def set_asset(brand_id: int, kind: str, data: bytes):
     with _conn() as c:
-        c.execute("INSERT OR REPLACE INTO assets (brand_id, kind, data) VALUES (?,?,?)",
-                  (brand_id, kind, sqlite3.Binary(data)))
+        c.execute("INSERT OR REPLACE INTO assets (brand_id, kind, data, created_at) VALUES (?,?,?,?)",
+                  (brand_id, kind, sqlite3.Binary(data), _now().isoformat()))
 
 
 def get_asset(brand_id: int, kind: str):
@@ -602,12 +625,16 @@ def regen_token(brand_id: int) -> str:
 
 # ============ Шаблоны ============
 def seed_templates(brand_id: int, lang: str = "ru", keys=None):
+    """Стартовые стили, подогнанные под бренд: многоцветный логотип (плашка, аватарка) остаётся
+    в своих цветах, ширина логотипа — по его пропорциям (spec.brand_traits)."""
     import spec as S
+    b = get_brand(brand_id) or {}
+    traits = S.brand_traits(get_asset(brand_id, "logo"), (b.get("kit") or {}).get("palette"))
     ids = []
     for key in keys or S.SEED_PRESETS:
         p = S.preset(key)
         if p:
-            ids.append(create_template(brand_id, p["name"].get(lang) or p["name"]["ru"], S.preset_spec(key)))
+            ids.append(create_template(brand_id, p["name"].get(lang) or p["name"]["ru"], S.preset_spec(key, traits)))
     return ids
 
 
@@ -688,15 +715,25 @@ def image_assets(brand_id: int) -> list:
             "SELECT kind FROM assets WHERE brand_id=? AND kind LIKE 'img\\_%' ESCAPE '\\'", (brand_id,))]
 
 
-def gc_images(brand_id: int) -> int:
-    """Удаляет картинки, на которые не ссылается ни один шаблон бренда."""
+GC_MIN_AGE_HOURS = 24
+
+
+def gc_images(brand_id: int, min_age_hours: float = GC_MIN_AGE_HOURS) -> int:
+    """Удаляет картинки, на которые не ссылается ни один шаблон бренда и которые
+    загружены больше суток назад. Свежую не трогаем: её мог только что загрузить
+    другой участник, а шаблон с ней ещё не сохранён."""
     used = set()
     for t in list_templates(brand_id):
         for surf in ("feed", "story"):
             for L in t["spec"].get(surf, {}).get("layers", []):
                 if L.get("type") == "image":
                     used.add(L.get("asset"))
-    dead = [k for k in image_assets(brand_id) if k not in used]
+    cutoff = (_now() - timedelta(hours=min_age_hours)).isoformat()
+    with _conn() as c:
+        old = [r["kind"] for r in c.execute(
+            "SELECT kind FROM assets WHERE brand_id=? AND kind LIKE 'img\\_%' ESCAPE '\\' "
+            "AND created_at IS NOT NULL AND created_at < ?", (brand_id, cutoff))]
+    dead = [k for k in old if k not in used]
     for k in dead:
         del_asset(brand_id, k)
     return len(dead)

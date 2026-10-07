@@ -9,6 +9,8 @@ import io
 import os
 import re
 import html
+import json
+import hashlib
 import time
 import signal
 import asyncio
@@ -41,6 +43,7 @@ import spec as S
 import web
 import backups
 import persist
+import quota
 from texts import t as _t, MONTHS_GEN
 from typo import typograf
 
@@ -50,29 +53,61 @@ logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logger = logging.getLogger("numbus")
 warnings.filterwarnings("ignore", category=PTBUserWarning)
 
-TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_IDS = {int(x) for x in re.split(r"[,\s]+", os.environ.get("ADMIN_IDS", "")) if x.strip().isdigit()}
-SUPPORT = os.environ.get("SUPPORT_CONTACT", "администратору")
-PORT = int(os.environ.get("PORT", "8080"))
+
+def env_int(name, default, lo=None, hi=None):
+    """Число из переменной окружения. Пусто, «4h», «-1» вне границ — значение по умолчанию и
+    предупреждение в логе: опечатка в Railway не должна ронять бота."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(float(raw.replace(",", ".")))
+        if (lo is not None and v < lo) or (hi is not None and v > hi):
+            raise ValueError(raw)
+        return v
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("%s=%r — не подходит, беру %s", name, raw, default)
+        return default
+
+
+def env_tz(name, default="Europe/Moscow"):
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        return ZoneInfo(raw or default)
+    except Exception:
+        logger.warning("%s=%r — неизвестный часовой пояс, беру %s", name, raw, default)
+        return ZoneInfo(default)
+
+
+TOKEN = (os.environ.get("BOT_TOKEN") or "").strip() or None
+ADMIN_IDS = {int(x) for x in re.split(r"[,;\s]+", os.environ.get("ADMIN_IDS", "")) if x.strip().isdigit()}
+SUPPORT = os.environ.get("SUPPORT_CONTACT", "").strip() or "администратору"
+PORT = env_int("PORT", 8080, 1, 65535)
 _domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
-WEBAPP_URL = (os.environ.get("WEBAPP_URL") or (f"https://{_domain}" if _domain else "")).rstrip("/")
+WEBAPP_URL = ((os.environ.get("WEBAPP_URL") or "").strip() or (f"https://{_domain.strip()}" if _domain else "")).rstrip("/")
 PRIVACY_URL = os.environ.get("PRIVACY_URL", "").strip()
 TG_PROXY = os.environ.get("TG_PROXY", "").strip()           # socks5://… или http://… — если Telegram режут
-TG_API_URL = os.environ.get("TG_API_URL", "").rstrip("/")   # свой сервер Bot API (telegram-bot-api)
-TZ = ZoneInfo(os.environ.get("BOT_TZ", "Europe/Moscow"))
-BACKUP_HOUR = int(os.environ.get("BACKUP_HOUR", "4"))
-BACKUP_TO_TELEGRAM = os.environ.get("BACKUP_TO_TELEGRAM", "").lower() in ("1", "true", "yes")
-PILOT_DAYS = int(os.environ.get("PILOT_DAYS", "30"))
+TG_API_URL = os.environ.get("TG_API_URL", "").strip().rstrip("/")   # свой сервер Bot API (telegram-bot-api)
+TZ = env_tz("BOT_TZ")
+BACKUP_HOUR = backups.backup_hour(4)                                  # "", "04:00", "4" → 4
+BACKUP_TO_TELEGRAM = backups.env_bool("BACKUP_TO_TELEGRAM", False)    # true / 1 / yes / on
+PILOT_DAYS = env_int("PILOT_DAYS", 30, 1, 3650)
 MAX_BATCH = 30
 ALBUM = 10                              # Telegram собирает в альбом до 10 файлов
-RENDER_SEM = asyncio.Semaphore(int(os.environ.get("RENDER_WORKERS", "2")))
+CAPTION_MAX = 1024                      # подпись под фото или альбомом в Telegram
+RENDER_SEM = asyncio.Semaphore(env_int("RENDER_WORKERS", 2, 1, 32))
 HTML = ParseMode.HTML
 esc = html.escape
 
 MENU, CODE, K_NAME, K_LOGO, K_COLOR, K_PHOTO, REQ = range(7)
 
 FORMATS = ["4:5", "3:4", "1:1", "3:2", "16:9", "1.91:1", "9:16", "orig"]
-CODE_RE = r"(?i)^\s*NB-[A-Z0-9]{4}-[A-Z0-9]{4}\s*$"
+# Код доступа где угодно в сообщении: «NB-AAAA-BBBB», «nb aaaa bbbb», пересланный блок «Для клиента»…
+CODE_RE = r"(?i)(?<![A-Z0-9])NB[\s\-\u2010-\u2015_.]*[A-Z0-9]{4}[\s\-\u2010-\u2015_.]*[A-Z0-9]{4}(?![A-Z0-9])"
+CODE_FIND = re.compile(CODE_RE)
+CODE_LIKE = re.compile(r"(?i)(?<![A-Z0-9])NB[\s\-\u2010-\u2015_.]*[A-Z0-9]")
+# буквы, которые при перепечатке кода легко набрать кириллицей
+HOMOGLYPHS = str.maketrans("АВЕКМНОРСТХУавекмнорстху", "ABEKMHOPCTXYABEKMHOPCTXY")
 HEX_RE = re.compile(r"^#?([0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})$")
 
 
@@ -190,7 +225,20 @@ async def pre_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     m = update.message
     if m and m.chat.type == "private" and update.effective_user and not update.effective_user.is_bot:
         db.log_msg(m.chat_id, m.message_id, "user")
-        ctx.user_data["_answered"] = PROMPTS.pop(m.chat_id, [])
+        ctx.user_data["_answered"] = list(PROMPTS.get(m.chat_id, []))
+
+
+# Команды, которые не отвечают на открытый вопрос (/help, /desktop…): вопрос остаётся в чате.
+# /start, /menu и /cancel начинают заново — старый вопрос уходит.
+RESET_CMDS = ("start", "menu", "cancel")
+
+
+def _side_command(m) -> bool:
+    t = (m.text or "").strip()
+    if not t.startswith("/"):
+        return False
+    cmd = t[1:].split()[0].split("@")[0].lower() if len(t) > 1 else ""
+    return cmd not in RESET_CMDS
 
 
 async def post_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -198,8 +246,16 @@ async def post_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     m = update.message
     if m and m.chat.type == "private" and update.effective_user and not update.effective_user.is_bot:
         keep = ctx.user_data.pop("_keep_msg", False)
-        ids = ctx.user_data.pop("_answered", []) + ([] if keep else [m.message_id])
-        await delete_ids(ctx.bot, m.chat_id, ids)
+        answered = ctx.user_data.pop("_answered", [])
+        if _side_command(m):
+            answered = []                              # на вопрос не ответили — он остаётся
+        else:
+            left = [i for i in PROMPTS.get(m.chat_id, []) if i not in answered]
+            if left:
+                PROMPTS[m.chat_id] = left
+            else:
+                PROMPTS.pop(m.chat_id, None)
+        await delete_ids(ctx.bot, m.chat_id, answered + ([] if keep else [m.message_id]))
 
 
 # ============ Утилиты ============
@@ -217,7 +273,8 @@ def tx(ctx, key, **kw):
 
 
 def reset_session(ctx):
-    for k in ("wiz", "kit_bid", "await", "code", "wiz_colors", "wiz_album", "wiz_t0", "wiz_seen"):
+    for k in ("wiz", "kit_bid", "await", "code", "wiz_colors", "wiz_album", "wiz_t0", "wiz_seen", "wiz_gid", "wiz_fuid",
+              "smp_gid"):
         ctx.user_data.pop(k, None)
 
 
@@ -452,8 +509,51 @@ def is_image(data: bytes) -> bool:
         return False
 
 
+WORK_LONG = 4000            # рабочая копия HEIC и огромных фото: длинная сторона, px
+WORK_PIXELS = 24_000_000    # не-JPEG больше этого — тоже в рабочую копию
+
+
+def working_copy(data: bytes) -> bytes:
+    """HEIC (и огромный PNG/TIFF) декодируется долго — при каждом нажатии пульта заново.
+    Такие фото один раз превращаются в рабочий JPEG: q95, длинная сторона до 4000, sRGB,
+    поворот из EXIF уже применён. JPEG остаётся как есть: он и так открывается быстро."""
+    try:
+        im = Image.open(io.BytesIO(data))
+        fmt, px = (im.format or "").upper(), im.size[0] * im.size[1]
+    except Exception:
+        return data
+    if fmt in ("JPEG", "MPO") or (fmt not in ("HEIF", "HEIC", "AVIF") and px <= WORK_PIXELS):
+        return data
+    try:
+        img = R.open_image(data, R.PHOTO_SHORT)   # фото, а не ассет: предел 100 Мп, раскрытие с уменьшением
+    except Exception as e:                    # не открылось — пусть решает обычная проверка
+        logger.info("working copy: %s", e)
+        return data
+    img = img.convert("RGB")
+    img.thumbnail((WORK_LONG, WORK_LONG), Image.LANCZOS)
+    return R.to_jpeg(img, 95)
+
+
 def is_admin(update):
     return bool(update.effective_user and update.effective_user.id in ADMIN_IDS)
+
+
+def find_code(text):
+    """Код доступа из любого места сообщения → «NB-XXXX-XXXX» (или None)."""
+    m = CODE_FIND.search((text or "").translate(HOMOGLYPHS))
+    if not m:
+        return None
+    raw = re.sub(r"[^A-Za-z0-9]", "", m.group(0)).upper()
+    return f"NB-{raw[2:6]}-{raw[6:10]}"
+
+
+class _HasCode(filters.MessageFilter):
+    """В тексте есть код доступа (в любом месте, в любом написании)."""
+    def filter(self, message):
+        return bool(find_code(message.text))
+
+
+HAS_CODE = _HasCode()
 
 
 def uniq(seq):
@@ -465,15 +565,21 @@ def uniq(seq):
 
 
 # ============ Главное меню ============
+def brand_label(ctx, b):
+    """Название бренда для меню и кнопок; до настройки — «Новый бренд», а не прочерк."""
+    return (b.get("kit") or {}).get("name") or tx(ctx, "brand_unnamed")
+
+
 def menu_text(ctx, b, note=None):
     lang = ctx.user_data.get("lang", "ru")
-    lines = ([note + "\n"] if note else []) + [tx(ctx, "menu_head", brand=esc(b["kit"].get("name") or "—"))]
+    lines = ([note + "\n"] if note else []) + [tx(ctx, "menu_head", brand=esc(brand_label(ctx, b)))]
     if b.get("locked"):
         lines.append(tx(ctx, "menu_locked", support=esc(SUPPORT)))
     elif db.plan_active(b):
         _, reset = db.period_bounds(db.get_brand(b["root_id"]) or b)
-        lines.append(tx(ctx, "menu_plan", plan=plan_label(ctx, b["plan"]), until=fmt_day(b["plan_until"], lang),
-                        used=db.photos_used(b["id"]), limit=plan_limits(b)["photos"], reset=fmt_day(reset, lang)))
+        until, reset = fmt_day(b["plan_until"], lang), fmt_day(reset, lang)
+        lines.append(tx(ctx, "menu_plan" if reset != until else "menu_plan_noreset", plan=plan_label(ctx, b["plan"]),
+                        until=until, used=db.photos_used(b["id"]), limit=plan_limits(b)["photos"], reset=reset))
     else:
         lines.append(tx(ctx, "menu_expired", until=fmt_day(b["plan_until"], lang), support=esc(SUPPORT)))
     n_brands, max_brands = len(db.sub_brand_ids(b["id"])), plan_limits(b)["brands"]
@@ -501,7 +607,7 @@ def menu_kb(ctx, b, brands, admin=False):
             rows.append([eb, Btn(tx(ctx, "b_desktop"), callback_data="menu:desktop")])
         elif not db.has_asset(b["id"], "logo"):
             rows.append([Btn(tx(ctx, "k_setup"), callback_data="menu:setup")])
-        if db.has_asset(b["id"], "logo"):
+        if db.has_asset(b["id"], "logo") and SMP.enabled() and db.plan_active(b) and not b.get("locked"):
             rows.append([Btn(tx(ctx, "b_sample"), callback_data="smp:start")])
     if can_add_brand(b):
         rows.append([Btn(tx(ctx, "b_add_brand"), callback_data="menu:addbrand")])
@@ -612,8 +718,8 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not b:
         return await show_menu(update, ctx)
     if action == "switch":
-        rows = [[Btn(("✓ " if x["id"] == b["id"] else "") + ("⏸ " if x.get("locked") else "")
-                     + (x["kit"].get("name") or f"#{x['id']}"), callback_data=f"sw:{x['id']}")] for x in brands]
+        rows = [[Btn(("✓ " if x["id"] == b["id"] else "") + brand_label(ctx, x)
+                     + (tx(ctx, "b_paused") if x.get("locked") else ""), callback_data=f"sw:{x['id']}")] for x in brands]
         rows.append([Btn(tx(ctx, "b_menu"), callback_data="menu:home")])
         await edit_or_say(update, tx(ctx, "switch_head"), KB(rows))
         return MENU
@@ -659,7 +765,7 @@ async def send_desktop_link(update, ctx, b):
         await say(update, tx(ctx, "kit_owner_only"), kind="notice")
         return
     if not WEBAPP_URL:
-        await say(update, tx(ctx, "editor_off"))
+        await say(update, tx(ctx, "editor_off", support=esc(SUPPORT)), kind="notice")
         return
     tok = db.create_login_link(update.effective_user.id, b["id"])
     url = f"{WEBAPP_URL}/?b={b['id']}&k={tok}"
@@ -685,7 +791,7 @@ def settings_kb(ctx, uid, b):
     if PRIVACY_URL:
         rows.append([Btn(tx(ctx, "b_privacy"), url=PRIVACY_URL)])
     if b and b["role"] == "owner":
-        rows.append([Btn(tx(ctx, "b_del_brand", brand=(b["kit"].get("name") or f"#{b['id']}")[:24]),
+        rows.append([Btn(tx(ctx, "b_del_brand", brand=brand_label(ctx, b)[:24]),
                          callback_data="set:delb")])
     rows.append([Btn(tx(ctx, "b_del_me"), callback_data="set:delme")])
     rows.append([Btn(tx(ctx, "b_menu"), callback_data="menu:home")])
@@ -718,7 +824,7 @@ async def on_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if b["root_id"] == b["id"]:
             others = [x["kit"].get("name") or f"#{x['id']}" for x in db.sub_brands(b["id"]) if x["id"] != b["id"]]
             names = tx(ctx, "del_brand_sub", names=esc(", ".join(others))) if others else ""
-        await edit_or_say(update, tx(ctx, "del_brand_confirm", brand=esc(b["kit"].get("name") or "—"), sub=names),
+        await edit_or_say(update, tx(ctx, "del_brand_confirm", brand=esc(brand_label(ctx, b)), sub=names),
                           KB([[Btn(tx(ctx, "b_del_yes"), callback_data=f"set:delbyes:{b['id']}")], back]))
         return
     if action.startswith("delbyes:"):
@@ -729,6 +835,7 @@ async def on_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ids = db.sub_brand_ids(bid) if (db.get_brand(bid) or {}).get("root_id") == bid else [bid]
         team = {r["tg_id"] for x in ids for r in db.team_stats(x)} | {uid}
         gone = db.delete_brand(bid)
+        forget_samples(team)
         db.log_event("delete_brand", uid, None, brands=gone)
         for member in team:
             await sync_menu_button(ctx.bot, member)
@@ -746,6 +853,8 @@ async def on_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.clear()
         gone = db.delete_user(uid)
         persist.forget_user(uid)
+        forget_samples([uid])
+        quota.forget_user(uid)
         db.log_event("delete_user", None, None, brands=len(gone))
         await edit_or_say(update, _t(lang, "del_me_done"))
         await sync_menu_button(ctx.bot, uid)
@@ -779,13 +888,13 @@ async def maybe_quick(update, ctx) -> bool:
 
 async def on_request_text(update, ctx):
     L(ctx, update)
-    if not re.match(CODE_RE, update.message.text or "") and await maybe_quick(update, ctx):
+    if not find_code(update.message.text) and await maybe_quick(update, ctx):
         return ConversationHandler.END
     u = update.effective_user
     text = (update.message.text or "").strip()
     if not text:
         return REQ
-    if re.match(CODE_RE, text):
+    if find_code(text):
         return await on_code(update, ctx)
     rid = db.create_request(u.id, u.full_name, u.username, text)
     db.log_event("access_request", u.id, None, request=rid)
@@ -860,16 +969,21 @@ async def on_wiz_start(update, ctx):
 async def on_code(update, ctx):
     L(ctx, update)
     uid = update.effective_user.id
-    is_code = bool(re.match(CODE_RE, update.message.text or ""))
-    if is_code:
+    text = update.message.text or ""
+    code = find_code(text)
+    if code:
         ctx.user_data.pop("await", None)     # прислали код — он важнее вопроса пульта
     elif await maybe_quick(update, ctx):
         return ConversationHandler.END
-    code = (update.message.text or "").strip().upper()
-    if "NB" not in code and db.user_brands(uid):
-        # «Ввести код» нажали и передумали: обычный текст — не код, отвечаем как вне диалога
-        await on_quick_text(update, ctx)
-        return ConversationHandler.END
+    if not code:
+        if db.user_brands(uid) and not CODE_LIKE.search(text.translate(HOMOGLYPHS)):
+            # «Ввести код» нажали и передумали: обычный текст — не код, отвечаем как вне диалога
+            await on_quick_text(update, ctx)
+            return ConversationHandler.END
+        # на приветствии написали не код: подсказка, как он выглядит, и «Запросить доступ»
+        rows = [] if db.user_brands(uid) else [[Btn(tx(ctx, "b_request"), callback_data="acc:req")]]
+        await say(update, tx(ctx, "code_format"), KB(rows) if rows else None)
+        return CODE
     res = db.peek_invite(code)
     if not res:
         await say(update, tx(ctx, "code_bad"))
@@ -878,7 +992,7 @@ async def on_code(update, ctx):
     roots = db.owned_roots(uid)
     if roots:
         ctx.user_data["code"] = code
-        rows = [[Btn(tx(ctx, "b_code_extend", brand=(r["kit"].get("name") or f"#{r['id']}")[:24]),
+        rows = [[Btn(tx(ctx, "b_code_extend", brand=brand_label(ctx, r)[:24]),
                      callback_data=f"code:ext:{r['id']}")] for r in roots[:3]]
         rows.append([Btn(tx(ctx, "b_code_new"), callback_data="code:new")])
         rows.append([Btn(tx(ctx, "b_menu"), callback_data="menu:home")])
@@ -928,7 +1042,7 @@ async def on_code_choice(update, ctx):
     db.extend_brand(bid, days, plan)
     b = db.get_brand(bid)
     db.log_event("code_extend", uid, bid, plan=plan, days=days)
-    await edit_or_say(update, tx(ctx, "code_extended", brand=esc(b["kit"].get("name") or "—"),
+    await edit_or_say(update, tx(ctx, "code_extended", brand=esc(brand_label(ctx, b)),
                                  until=fmt_day(b["plan_until"], ctx.user_data.get("lang", "ru"))))
     db.set_active_brand(uid, bid)
     return await show_menu(update, ctx)
@@ -940,7 +1054,7 @@ async def do_join(update, ctx, token):
     if not b:
         await say(update, tx(ctx, "join_bad"), kind="notice", ttl=60)
         return await show_menu(update, ctx)
-    name = esc(b["kit"].get("name") or "—")
+    name = esc(brand_label(ctx, b))
     if db.member_role(b["id"], u.id):
         db.set_active_brand(u.id, b["id"])
         await say(update, tx(ctx, "join_ok", brand=name), kind="notice")
@@ -973,7 +1087,7 @@ async def show_team(update, ctx, b, edit=False):
         await say(update, tx(ctx, "team_owner_only"), kind="notice")
         return MENU
     link = f"https://t.me/{ctx.bot.username}?start=j_{b['join_token']}"
-    text = tx(ctx, "team_head", brand=esc(b["kit"].get("name") or "—"), n=db.sub_member_count(b["id"]),
+    text = tx(ctx, "team_head", brand=esc(brand_label(ctx, b)), n=db.sub_member_count(b["id"]),
               limit=plan_limits(b)["members"], link=link)
     stats = db.team_stats(b["id"])
     text += tx(ctx, "team_activity")
@@ -1015,7 +1129,7 @@ async def on_team_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_team(update, ctx, b, edit=True)
         return
     name = esc(person_name(r))
-    brand = esc(b["kit"].get("name") or "—")
+    brand = esc(brand_label(ctx, b))
     back = [Btn(tx(ctx, "b_team_back"), callback_data="team:show")]
     act = parts[2] if len(parts) > 2 else ""
     if act == "del":
@@ -1096,8 +1210,7 @@ async def on_name(update, ctx):
         return await show_menu(update, ctx)
     name = (update.message.text or "").strip()
     if not 1 <= len(name) <= 40:
-        await say(update, tx(ctx, "name_bad"))
-        return K_NAME
+        return await wiz_reask(update, ctx, K_NAME, tx(ctx, "name_bad"))
     db.update_kit(bid, name=name)
     db.log_event("kit_name", update.effective_user.id, bid)
     wiz_touch(ctx)
@@ -1156,23 +1269,24 @@ async def on_logo(update, ctx):
     return await ask_color(update, ctx, png)
 
 
-async def ask_color(update, ctx, png):
+async def ask_color(update, ctx, png, note=None):
     wiz_touch(ctx)
     try:
         colors = await run(R.logo_colors, png)
     except Exception:
         colors = []
     ctx.user_data["wiz_colors"] = colors
+    pre = (note + "\n\n") if note else ""
     skip = Btn(tx(ctx, "b_skip"), callback_data="wz:c:skip")
     if colors:
         rows = [[Btn(tx(ctx, "b_color_n", n=i + 1), callback_data=f"wz:c:{i}") for i in range(len(colors))],
                 [Btn(tx(ctx, "b_color_own"), callback_data="wz:c:own"), skip]]
         m = await update.effective_chat.send_photo(io.BytesIO(swatch_png(colors)),
-                                                   caption=step(ctx, 3) + tx(ctx, "ask_color_found"),
+                                                   caption=pre + step(ctx, 3) + tx(ctx, "ask_color_found"),
                                                    parse_mode=HTML, reply_markup=KB(rows))
         track(m, "prompt")
     else:
-        await say(update, step(ctx, 3) + tx(ctx, "ask_color_none"), KB([[skip]]))
+        await say(update, pre + step(ctx, 3) + tx(ctx, "ask_color_none"), KB([[skip]]))
     return K_COLOR
 
 
@@ -1215,8 +1329,7 @@ async def on_color_text(update, ctx):
         return ConversationHandler.END
     m = HEX_RE.match((update.message.text or "").strip())
     if not m:
-        await say(update, tx(ctx, "color_bad"))
-        return K_COLOR
+        return await wiz_reask(update, ctx, K_COLOR, tx(ctx, "color_bad"))
     bid = kit_bid(ctx, update.effective_user.id)
     if not bid:
         return await show_menu(update, ctx)
@@ -1228,10 +1341,69 @@ async def on_color_text(update, ctx):
     return await ask_photo(update, ctx)
 
 
-async def ask_photo(update, ctx):
+async def ask_photo(update, ctx, note=None):
     wiz_touch(ctx)
-    await say(update, step(ctx, 4) + tx(ctx, "ask_photo"), KB([[Btn(tx(ctx, "b_skip"), callback_data="wz:skip")]]))
+    await say(update, ((note + "\n\n") if note else "") + step(ctx, 4) + tx(ctx, "ask_photo"),
+              KB([[Btn(tx(ctx, "b_skip"), callback_data="wz:skip")]]))
     return K_PHOTO
+
+
+async def wiz_reask(update, ctx, state, note=None):
+    """Шаг мастера получил не то, что ждал: тот же вопрос ещё раз — с короткой подсказкой сверху.
+    Так в чате всегда виден вопрос текущего шага, а ответ не уходит в посты."""
+    wiz_touch(ctx)
+    pre = (note + "\n\n") if note else ""
+    if state == K_NAME:
+        await say(update, pre + step(ctx, 1) + tx(ctx, "ask_name"))
+    elif state == K_LOGO:
+        await say(update, pre + step(ctx, 2) + tx(ctx, "ask_logo"))
+    elif state == K_COLOR:
+        bid = kit_bid(ctx, update.effective_user.id)
+        logo = db.get_asset(bid, "logo") if bid else None
+        if not logo:                                   # логотипа нет (удалили в редакторе) — шаг логотипа
+            await say(update, pre + step(ctx, 2) + tx(ctx, "ask_logo"))
+            return K_LOGO
+        return await ask_color(update, ctx, logo, note=note)
+    elif state == K_PHOTO:
+        if ctx.user_data.get("wiz_album"):            # три стиля уже показаны — ждём выбор кнопкой
+            await say(update, note or tx(ctx, "wiz_pick_hint"), kind="notice")
+        else:
+            return await ask_photo(update, ctx, note=note)
+    return state
+
+
+def _wiz_other(state):
+    """Запасной обработчик шага: стикер, видео, текст вместо картинки и наоборот."""
+    notes = {K_NAME: "wiz_need_name", K_LOGO: "wiz_need_logo", K_COLOR: "wiz_need_color", K_PHOTO: "wiz_need_photo"}
+
+    async def handler(update, ctx):
+        L(ctx, update)
+        if wiz_stale(ctx):
+            return await wiz_expired(update, ctx)
+        m = update.message
+        if m is None:
+            return state
+        if m.text and await maybe_quick(update, ctx):   # ответ на вопрос пульта («Текст», «Своя рубрика»)
+            return ConversationHandler.END
+        if state == K_COLOR and m.document:
+            return await on_logo(update, ctx)            # прислали логотип файлом (как советовали) — замена
+        note = tx(ctx, "wiz_photo_is_post") if (state == K_COLOR and m.photo) else tx(ctx, notes[state])
+        if state == K_PHOTO and ctx.user_data.get("wiz_album"):
+            note = tx(ctx, "wiz_pick_hint")
+        return await wiz_reask(update, ctx, state, note)
+    handler.__name__ = f"on_wiz_other_{state}"
+    return handler
+
+
+def brand_traits(bid):
+    """Признаки бренда для стартовых стилей: многоцветный логотип остаётся в своих цветах,
+    ширина логотипа — по его пропорциям (spec.brand_traits). Никогда не падает."""
+    try:
+        b = db.get_brand(bid) or {}
+        return S.brand_traits(db.get_asset(bid, "logo"), (b.get("kit") or {}).get("palette"))
+    except Exception:
+        logger.exception("brand_traits")
+        return None
 
 
 def _onboard_job(bid, data, title, tag, lang):
@@ -1240,8 +1412,9 @@ def _onboard_job(bid, data, title, tag, lang):
     photo = R.open_photo(data)
     W, H = 1080, 1350
     out = []
+    traits = brand_traits(bid)
     for key in S.ONBOARD_PRESETS:
-        spec = S.preset_spec(key)
+        spec = S.preset_spec(key, traits)
         ctx.notes = set()
         out.append((key, R.to_preview(R.render_surface(photo, W, H, spec["feed"]["layers"], ctx), 1080)))
     return out
@@ -1254,30 +1427,47 @@ async def on_wiz_photo(update, ctx):
     bid = kit_bid(ctx, update.effective_user.id)
     if not bid:
         return await show_menu(update, ctx)
+    msg = update.message
+    gid = msg.media_group_id
+    fuid = msg.photo[-1].file_unique_id if msg.photo else (msg.document.file_unique_id if msg.document else None)
+    if ctx.user_data.get("wiz_album") or ctx.user_data.get("wiz_gid"):
+        # три стиля уже показаны (или рисуются): остальные фото того же альбома и то же фото
+        # ещё раз не множат примеры. Новое фото — заменяет прежние примеры.
+        if (gid and gid == ctx.user_data.get("wiz_gid")) or (fuid and fuid == ctx.user_data.get("wiz_fuid")):
+            return K_PHOTO
+    chat_id = update.effective_chat.id
     data, _ = await get_file_bytes(update, ctx)
     if not data or not is_image(data):
-        await say(update, tx(ctx, "photo_bad"), kind="notice")
-        return K_PHOTO
+        if ctx.user_data.get("wiz_album"):
+            await say(update, tx(ctx, "photo_bad"), kind="notice")
+            return K_PHOTO
+        return await ask_photo(update, ctx, note=tx(ctx, "photo_bad"))
+    old = ctx.user_data.pop("wiz_album", None)
+    if old:
+        await delete_ids(ctx.bot, chat_id, old)
+    ctx.user_data["wiz_gid"], ctx.user_data["wiz_fuid"] = gid, fuid
     lang = ctx.user_data.get("lang", "ru")
-    title, subtitle, tag, tags, _ = parse_text(marked(update.message.caption, update.message.caption_entities))
+    title, subtitle, tag, tags, _ = parse_text(marked(msg.caption, msg.caption_entities))
     wait = await say(update, tx(ctx, "styles_wait"), kind="keep")
     try:
+        data = await run(working_copy, data)
         db.set_asset(bid, "sample", await run(web._prep_sample, data))
-        shots = await run(_onboard_job, bid, data, title or tx(ctx, "style_sample_title"),
+        shots = await run(_onboard_job, bid, data, image_text(title) or tx(ctx, "style_sample_title"),
                           tag or ("#рубрика" if lang == "ru" else "#section"), lang)
     except Exception as e:
         logger.exception("onboard render: %s", e)
-        await delete_ids(ctx.bot, update.effective_chat.id, [wait.message_id])
-        await say(update, tx(ctx, "photo_bad"), kind="notice")
-        return K_PHOTO
+        ctx.user_data.pop("wiz_gid", None)
+        ctx.user_data.pop("wiz_fuid", None)
+        await delete_ids(ctx.bot, chat_id, [wait.message_id])
+        return await ask_photo(update, ctx, note=tx(ctx, "photo_bad"))
     media = [InputMediaPhoto(io.BytesIO(jpg), caption=f"{i + 1} · {S.preset_name(key, lang)}")
              for i, (key, jpg) in enumerate(shots)]
-    msgs = await tg_call(ctx.bot.send_media_group, update.effective_chat.id, media)
-    await delete_ids(ctx.bot, update.effective_chat.id, [wait.message_id])
-    ctx.user_data["wiz_album"] = [m.message_id for m in msgs]
+    msgs = await tg_call(ctx.bot.send_media_group, chat_id, media)
+    await delete_ids(ctx.bot, chat_id, [wait.message_id])
     rows = [[Btn(f"{i + 1} · {S.preset_name(key, lang)}", callback_data=f"wz:s:{key}")]
             for i, (key, _) in enumerate(shots)]
-    await say(update, tx(ctx, "styles_pick"), KB(rows), kind="keep")
+    pick = await say(update, tx(ctx, "styles_pick"), KB(rows), kind="keep")
+    ctx.user_data["wiz_album"] = [m.message_id for m in msgs] + [pick.message_id]
     return K_PHOTO
 
 
@@ -1291,16 +1481,63 @@ async def on_style_pick(update, ctx):
     if not bid or not S.preset(key):
         return await show_menu(update, ctx)
     lang = ctx.user_data.get("lang", "ru")
-    had = db.template_count(bid) > 0
-    db.create_template(bid, S.preset_name(key, lang), S.preset_spec(key), first=True)
-    if not had:
-        for other in S.ONBOARD_PRESETS:
-            if other != key:
-                db.create_template(bid, S.preset_name(other, lang), S.preset_spec(other))
+    pick_starter_style(bid, key, lang, update.effective_user.id)
     db.log_event("onboard_style", update.effective_user.id, bid, style=key)
     chat_id = update.effective_chat.id
     await delete_ids(ctx.bot, chat_id, (ctx.user_data.pop("wiz_album", None) or []) + [update.callback_query.message.message_id])
     return await finish_wizard(update, ctx, S.preset_name(key, lang))
+
+
+def _same_spec(a, b):
+    """Стили совпадают с точностью до id слоёв (они случайные при каждом создании)."""
+    def norm(x):
+        if isinstance(x, dict):
+            return {k: norm(v) for k, v in x.items() if k != "id"}
+        if isinstance(x, (list, tuple)):
+            return [norm(v) for v in x]
+        return x
+    try:
+        return json.dumps(norm(a), sort_keys=True, ensure_ascii=False) == \
+            json.dumps(norm(b), sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return False
+
+
+def pick_starter_style(bid, key, lang, uid=None):
+    """Выбранный в мастере стиль — первым, без копий. Стартовые стили, которые уже есть
+    (их добавляет первый пост, если настройку бросили, или повторный выбор), не дублируются:
+    нетронутый — встаёт первым, изменённый в редакторе — остаётся как есть."""
+    tpls = db.list_templates(bid)
+    had = bool(tpls)
+    traits = brand_traits(bid)
+    names = {S.preset_name(k, l) for k in S.ONBOARD_PRESETS for l in ("ru", "en")}
+    want = json.loads(json.dumps(S.preset_spec(key, traits)))
+    name = S.preset_name(key, lang)
+    same = [t for t in tpls if t["name"] in (S.preset_name(key, "ru"), S.preset_name(key, "en"))]
+    tid = None
+    for t in same:
+        if _same_spec(t["spec"], want):
+            db.delete_template(bid, t["id"])           # нетронутая копия — пересоздаём первой
+        elif tid is None:
+            tid = t["id"]                              # её правили в редакторе — не трогаем
+    if tid is None:
+        tid = db.create_template(bid, name, S.preset_spec(key, traits), first=True)
+    if not had:
+        for other in S.ONBOARD_PRESETS:
+            if other != key:
+                db.create_template(bid, S.preset_name(other, lang), S.preset_spec(other, traits))
+    else:                                              # остальные стартовые — по одной копии
+        seen = set()
+        for t in db.list_templates(bid):
+            if t["name"] in names and t["id"] != tid:
+                k = t["name"]
+                if k in seen and any(_same_spec(t["spec"], json.loads(json.dumps(S.preset_spec(o, traits))))
+                                     for o in S.ONBOARD_PRESETS):
+                    db.delete_template(bid, t["id"])
+                seen.add(k)
+    if uid and isinstance(tid, int):
+        db.set_prefs(uid, bid, tid=tid)
+    return tid
 
 
 async def on_wiz_skip(update, ctx):
@@ -1336,6 +1573,7 @@ async def finish_wizard(update, ctx, style_name):
 # Любая правка перерисовывает превью на месте. «Файлы» отдают готовые JPG
 # альбомом, следом — текст поста; пульт появляется снова под ними.
 DRAFT_TTL = 180          # сек: фото без подписи в этот срок дополняют текущий пост
+SPLIT_GAP = 10           # сек: следующий альбом без подписи в этот срок — продолжение карусели
 REFRESH_DELAY = 1.2      # сек: ждём остальные фото альбома
 TAG_RE = re.compile(r"#[\w\-]+", re.U)
 TEXT_MAX = 300
@@ -1390,8 +1628,48 @@ def parse_text(text, fields=None):
             title, subtitle = body.split("\n", 1)
         else:
             title = body
+    # Подпись хранится целиком: в тексте поста и в подписи альбома — полностью.
+    # Укорачивается только то, что рисуется на картинке (image_text).
     cut = len(title.strip()) > TEXT_MAX or len(subtitle.strip()) > TEXT_MAX
-    return title.strip()[:TEXT_MAX], subtitle.strip()[:TEXT_MAX], (tags[0] if tags else None), tags, cut
+    return title.strip(), subtitle.strip(), (tags[0] if tags else None), tags, cut
+
+
+# Эмодзи на картинке шрифты не рисуют (выходят пустые квадраты) — на картинке их нет,
+# в тексте поста они остаются. Вместе с ними уходят невидимые склейки: FE0F, ZWJ, тоны кожи.
+EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U0001FC00-\U0001FFFF\u2600-\u27BF\u2B05-\u2B07\u2B1B\u2B1C\u2B50\u2B55"
+    "\u231A\u231B\u2328\u23CF\u23E9-\u23F3\u23F8-\u23FA\u3030\u303D\u3297\u3299"
+    "\uFE0E\uFE0F\u200D\u20E3\U000E0020-\U000E007F]"
+    "|[\u00A9\u00AE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9\u21AA\u24C2\u25AA\u25AB\u25B6\u25C0\u25FB-\u25FE]"
+    "(?=\uFE0F)")
+
+
+def strip_emoji(s):
+    if not s:
+        return s or ""
+    s = EMOJI_RE.sub("", s)
+    return "\n".join(re.sub(r"[ \t]{2,}", " ", ln).strip() for ln in s.split("\n")).strip()
+
+
+def image_text(s, limit=None):
+    """Текст для картинки: без эмодзи и не длиннее limit — по границе слова, с многоточием."""
+    limit = limit or TEXT_MAX
+    s = strip_emoji(s or "")
+    if len(s) <= limit:
+        return s
+    cut = s[:limit]
+    sp = max(cut.rfind(" "), cut.rfind("\n"))
+    if sp > limit * 0.6:
+        cut = cut[:sp]
+    cut = cut.rstrip(" \n,.;:—–-")
+    if len(re.findall(r"(?<!\\)\*", cut)) % 2:      # выделение «*…*» оборвалось — закрываем
+        cut += "*"
+    return cut + "…"
+
+
+def utf16_len(s) -> int:
+    """Длина так, как её считает Telegram (единицы UTF-16)."""
+    return len((s or "").encode("utf-16-le")) // 2
 
 
 def draft(ctx, uid=None):
@@ -1424,15 +1702,34 @@ def _zoom(d, i):
 
 def _ctx_for(base, d, i, n, dark):
     return R.Ctx(base.palette, base.logos, base.customs,
-                 dict(title=d.get("title", ""), subtitle=d.get("subtitle", ""), hashtag=d.get("tag") or "",
-                      i=i, n=n), dark, base.images, focus=_focus(d, i - 1), zoom=_zoom(d, i - 1))
+                 dict(title=image_text(d.get("title", "")), subtitle=image_text(d.get("subtitle", "")),
+                      hashtag=d.get("tag") or "", i=i, n=n), dark, base.images, focus=_focus(d, i - 1),
+                 zoom=_zoom(d, i - 1))
+
+
+def surface(spec, fmt):
+    """Какие слои рисовать → (слои, это сторис). Формат 9:16 у стиля со слоями сторис —
+    поверхность сторис с её безопасными зонами, а не лента, растянутая в 9:16. Слои сторис
+    есть у всех стартовых стилей, даже когда выдача сторис к каждому фото выключена;
+    редактор по кнопке 9:16 открывает ту же поверхность."""
+    st = spec.get("story") or {}
+    if fmt == "9:16" and (st.get("enabled") or st.get("layers")) and st.get("layers"):
+        return st.get("layers"), True
+    return (spec.get("feed") or {}).get("layers") or [], False
+
+
+def _surface_size(photo, fmt, story):
+    return R.STORY_SIZE if story else R.feed_size(photo, fmt)
 
 
 def _render_job(path, spec, fmt, ctx, out_dir, stem):
     """Рендер одного фото: лента (+ сторис) в файлы → [(suffix, path)]."""
     photo = R.open_photo(drafts.read(path))
     out = []
-    for suf, im in R.render_template(photo, spec, fmt, ctx):
+    layers, story = surface(spec, fmt)
+    shots = [("feed", R.render_surface(photo, *R.STORY_SIZE, layers, ctx))] if story else \
+        R.render_template(photo, spec, fmt, ctx)
+    for suf, im in shots:
         p = os.path.join(out_dir, f"{stem}{'' if suf == 'feed' else '_story'}.jpg")
         with open(p, "wb") as f:
             f.write(R.to_jpeg(im))
@@ -1442,9 +1739,10 @@ def _render_job(path, spec, fmt, ctx, out_dir, stem):
 
 def _preview_job(path, spec, fmt, ctx):
     photo = R.open_photo(drafts.read(path))
-    W, H = R.feed_size(photo, fmt)
-    img = R.render_surface(photo, W, H, spec["feed"]["layers"], ctx)
-    cw, ch = R.photo_box(spec["feed"]["layers"], W, H, int(ctx.fields.get("i") or 1))   # кадр или рамка фото
+    layers, story = surface(spec, fmt)
+    W, H = _surface_size(photo, fmt, story)
+    img = R.render_surface(photo, W, H, layers, ctx)
+    cw, ch = R.photo_box(layers, W, H, int(ctx.fields.get("i") or 1))   # кадр или рамка фото
     share = R.crop_share(photo.width, photo.height, cw, ch)
     horiz = photo.width / photo.height > cw / ch
     return R.to_preview(img), sorted(ctx.notes), share, horiz
@@ -1468,7 +1766,8 @@ def pult_caption(ctx, d, tp, notes=(), share=0.0):
     bits = [f"<b>{esc(tp['name'])}</b>", fmt_label(ctx, d["fmt"])]
     if "hashtag" in fields:
         bits.append(esc(d.get("tag") or tx(ctx, "q_no_tag")))
-    line2 = tx(ctx, "q_photos", n=n) + (tx(ctx, "tpl_story") if tp["spec"]["story"].get("enabled") else "")
+    line2 = tx(ctx, "q_photos", n=n) + (tx(ctx, "tpl_story") if tp["spec"]["story"].get("enabled")
+                                        and d["fmt"] != "9:16" else "")
     if n > 1:
         line2 += " · " + tx(ctx, "q_frame", i=d.get("cur", 0) + 1, n=n)
     lines = [" · ".join(bits), line2]
@@ -1531,10 +1830,13 @@ def _pult_lock(uid):
     return PULT_LOCK.setdefault(uid, asyncio.Lock())
 
 
-def _photo_ok(path) -> bool:
+def _photo_ok(path):
+    """True — фото открывается; "big" — больше 100 Мп; False — не открывается."""
     try:
         R.open_photo(drafts.read(path))
         return True
+    except R.TooBig:
+        return "big"
     except Exception:
         return False
 
@@ -1596,12 +1898,13 @@ async def _show_pult(bot, chat_id, ctx, uid, new=False, gen=None):
         except Exception:
             if not still_current():
                 return
-            if await run(_photo_ok, d["photos"][cur]):
+            why = await run(_photo_ok, d["photos"][cur])
+            if why is True:
                 raise                                # фото в порядке — ошибка в другом, пусть узнает админ
             if not still_current():
                 return
-            drop_photo(d, cur)                       # фото битое: убираем и говорим об этом
-            m = await bot.send_message(chat_id, _t(lang, "photo_dropped", i=cur + 1))
+            drop_photo(d, cur)                       # фото битое или огромное: убираем и говорим почему
+            m = await bot.send_message(chat_id, _t(lang, "photo_too_big" if why == "big" else "photo_dropped", i=cur + 1))
             track(m, "notice", 60)
             if not d["photos"]:
                 if d.get("msg"):
@@ -1651,7 +1954,7 @@ def schedule_pult(update, ctx):
             pass
         except Exception as e:
             logger.exception("pult: %s", e)
-            await alert_admins(bot, e, uid, "pult")
+            await alert_admins(bot, e, uid, "перерисовка превью (пульт)")
             try:
                 m = await bot.send_message(chat_id, _t(ctx.user_data.get("lang", "ru"), "error_user"))
                 track(m, "notice", 60)
@@ -1663,12 +1966,50 @@ def schedule_pult(update, ctx):
     task.add_done_callback(_TASKS.discard)
 
 
-# ============ Шаблон по образцу ============
+# ============ Стиль по образцу ============
+# Образец разбирает модель (платно), подгонка — локально. Вызов модели идёт вне RENDER_SEM:
+# 20–90 секунд ожидания провайдера не занимают места рендера других клиентов. Описание макета
+# кэшируется по sha1 картинки — «Собрать ещё раз» и тот же образец повторно не платят второй раз.
+# Расходы и лимиты — quota.py.
 SAMPLE_DIR = os.path.join(db.DATA_DIR, "samples")
 
 
 def _sample_path(uid):
     return os.path.join(SAMPLE_DIR, f"{uid}.img")
+
+
+def _sample_cache_path(uid):
+    return os.path.join(SAMPLE_DIR, f"{uid}.desc.json")
+
+
+def _sample_cache_get(uid, sha):
+    try:
+        with open(_sample_cache_path(uid), encoding="utf-8") as f:
+            c = json.load(f)
+        return c["desc"] if c.get("sha1") == sha and isinstance(c.get("desc"), dict) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _sample_cache_put(uid, sha, desc):
+    try:
+        os.makedirs(SAMPLE_DIR, exist_ok=True)
+        tmp = _sample_cache_path(uid) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"sha1": sha, "desc": desc}, f, ensure_ascii=False)
+        os.replace(tmp, _sample_cache_path(uid))
+    except (OSError, TypeError, ValueError) as e:
+        logger.info("sample cache: %s", e)
+
+
+def forget_samples(uids):
+    """«Удалить мои данные» и удаление бренда: образец и описание макета тоже уходят с диска."""
+    for uid in uids:
+        for p in (_sample_path(uid), _sample_cache_path(uid), _sample_cache_path(uid) + ".tmp"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
 
 def _sample_kb(ctx):
@@ -1677,24 +2018,103 @@ def _sample_kb(ctx):
                 Btn(tx(ctx, "b_smp_other"), callback_data="smp:start")]])
 
 
+def _sample_image(data):
+    return R.open_image(data).convert("RGB")
+
+
+async def notify_admins(bot, text):
+    for aid in ADMIN_IDS:
+        try:
+            await bot.send_message(aid, text, parse_mode=HTML, disable_web_page_preview=True)
+        except TelegramError:
+            pass
+
+
+async def sample_refusal(update, ctx, b):
+    """Лимиты и бюджет «Стиля по образцу»: None — можно, иначе клиент уже получил ответ."""
+    why = quota.check(b["id"])
+    if not why:
+        return None
+    day, month = quota.keys()
+    db.log_event("sample_refused", update.effective_user.id, b["id"], why=why)
+    if why == "budget":
+        await say(update, tx(ctx, "smp_budget", support=esc(SUPPORT)), kind="notice", ttl=60)
+        if quota.once(f"stop:{month}"):
+            await notify_admins(ctx.bot, f"<b>Стиль по образцу остановлен</b>: расход за месяц достиг бюджета "
+                                         f"${quota.VISION_BUDGET_USD:.2f}. Клиенты видят «временно недоступен» до 1-го числа. "
+                                         f"Поднять бюджет — переменная VISION_BUDGET_USD в Railway.")
+    elif why == "day":
+        await say(update, tx(ctx, "smp_limit_day"), kind="notice", ttl=60)
+        if quota.once(f"day:{day}"):
+            await notify_admins(ctx.bot, f"<b>Стиль по образцу</b>: на сегодня исчерпан общий лимит — "
+                                         f"{quota.SAMPLE_PER_DAY} разборов (SAMPLE_PER_DAY). Завтра счётчик обнулится.")
+    else:
+        await say(update, tx(ctx, "smp_limit_brand", n=quota.SAMPLE_PER_BRAND_DAY), kind="notice", ttl=60)
+    return why
+
+
+async def _record_call(bot, uid, bid, meta):
+    """Учесть платный вызов модели: счётчики, событие sample_call, предупреждения админам."""
+    meta = meta if isinstance(meta, dict) else {}
+    model = meta.get("model") or SMP.VISION_MODEL
+    rec = await asyncio.to_thread(quota.record, bid, uid, model, meta.get("usage"))
+    db.log_event("sample_call", uid, bid, model=model, tokens_in=rec["tokens_in"], tokens_out=rec["tokens_out"],
+                 usd=rec["usd"], month_usd=rec["month_usd"], stop=meta.get("stop_reason"))
+    budget = quota.VISION_BUDGET_USD
+    if budget and rec["share"] >= 1 and quota.once(f"stop:{rec['month']}"):
+        await notify_admins(bot, f"<b>Стиль по образцу остановлен</b>: расход за месяц ${rec['month_usd']:.2f} "
+                                 f"из ${budget:.2f}. Следующие разборы — с 1-го числа или после увеличения "
+                                 f"VISION_BUDGET_USD в Railway.")
+    elif budget and rec["share"] >= quota.WARN_SHARE and quota.once(f"warn80:{rec['month']}"):
+        await notify_admins(bot, f"<b>Стиль по образцу</b>: израсходовано ${rec['month_usd']:.2f} из ${budget:.2f} "
+                                 f"месячного бюджета (80%). На 100% разбор остановится до 1-го числа.")
+
+
 async def _sample_build(update, ctx, b, data):
-    """Образец → шаблон → «рядом» с кнопками. Ошибки — понятным текстом, без падения."""
+    """Образец → стиль → «рядом» с кнопками. → True, если получилось.
+    Ошибки — понятным текстом: сбой провайдера («сервис недоступен», админам — оповещение)
+    отдельно от неудачного образца («пришлите другой»)."""
     uid = update.effective_user.id
+    sha = hashlib.sha1(data).hexdigest()
+    desc = _sample_cache_get(uid, sha)
+    if desc is None and await sample_refusal(update, ctx, b):
+        return None
     wait = await say(update, tx(ctx, "smp_wait"), kind="keep")
     try:
         base = await run(web.brand_ctx, b["id"])
-        spec, fmt, _, jpg, notes, _ = await run(SMP.make, data, base, bool(base.logos))
+        if desc is None:
+            img = await run(_sample_image, data)
+            meta, called = None, False
+            try:
+                desc = await asyncio.to_thread(SMP.ask_model, img)   # вне RENDER_SEM: ждём провайдера
+                called = True
+                meta = desc.pop("_meta", None) if isinstance(desc, dict) else None
+            except SMP.SampleError as e:
+                meta, called = e.meta, e.meta is not None
+                raise
+            finally:
+                if called:
+                    await _record_call(ctx.bot, uid, b["id"], meta)
+            _sample_cache_put(uid, sha, desc)
+        spec, fmt, _, jpg, notes, _ = await run(SMP.make, data, base, bool(base.logos), desc)
     except SMP.SampleError as e:
         logger.warning("образец: %s", e)
-        db.log_event("sample_fail", uid, b["id"], code=e.code)
-        await say(update, tx(ctx, "smp_off", support=esc(SUPPORT)) if e.code == "not_configured" else tx(ctx, "smp_fail"),
-                  kind="notice")
-        return
+        db.log_event("sample_fail", uid, b["id"], code=e.code, status=e.status, provider=bool(e.provider))
+        if e.code == "not_configured":
+            await say(update, tx(ctx, "smp_off", support=esc(SUPPORT)), kind="notice")
+            return None
+        if e.provider:
+            await say(update, tx(ctx, "smp_unavailable"), kind="notice", ttl=60)
+            await alert_admins(ctx.bot, e, uid, "sample: провайдер модели")
+            return None                      # сервис недоступен: ожидание образца снимается, следующее фото — пост
+        await say(update, tx(ctx, "smp_fail"), kind="notice", ttl=60)
+        return False
     except Exception as e:
         logger.exception("образец: %s", e)
         db.log_event("sample_fail", uid, b["id"], code="crash")
-        await say(update, tx(ctx, "smp_fail"), kind="notice")
-        return
+        await say(update, tx(ctx, "smp_fail"), kind="notice", ttl=60)
+        await alert_admins(ctx.bot, e, uid, "sample: сборка стиля")
+        return False
     finally:
         if wait:
             await delete_ids(ctx.bot, update.effective_chat.id, [wait.message_id] if hasattr(wait, "message_id") else [])
@@ -1709,18 +2129,33 @@ async def _sample_build(update, ctx, b, data):
                                            parse_mode=HTML, reply_markup=_sample_kb(ctx))
     db.log_event("sample_built", uid, b["id"], fmt=fmt, layers=len(spec["feed"]["layers"]),
                  weak=len(notes.get("weak") or []))
+    return True
+
+
+async def _sample_run(update, ctx, b, data):
+    """Разбор с ожиданием: пока не получилось (и не /cancel) — следующая картинка тоже образец,
+    а не пост. Лимит или бюджет — ожидание снимается: присылать снова бессмысленно."""
+    ok = await _sample_build(update, ctx, b, data)
+    if ok is False:
+        ctx.user_data["await"] = "sample"
+    else:
+        ctx.user_data.pop("await", None)
 
 
 async def on_sample_photo(update, ctx, b):
-    ctx.user_data.pop("await", None)
+    gid = update.message.media_group_id
+    if gid and gid == ctx.user_data.get("smp_gid"):
+        return                                  # образец пришёл альбомом: разбираем только первое фото
+    ctx.user_data["smp_gid"] = gid
     data, _ = await get_file_bytes(update, ctx)
     if not data or not is_image(data):
+        ctx.user_data["await"] = "sample"
         await say(update, tx(ctx, "photo_bad"), kind="notice")
         return
     os.makedirs(SAMPLE_DIR, exist_ok=True)
     with open(_sample_path(update.effective_user.id), "wb") as f:
         f.write(data)
-    await _sample_build(update, ctx, b, data)
+    await _sample_run(update, ctx, b, data)
 
 
 async def on_sample_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1736,6 +2171,8 @@ async def on_sample_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not SMP.enabled():
             await say(update, tx(ctx, "smp_off", support=esc(SUPPORT)), kind="notice")
             return
+        if await sample_refusal(update, ctx, b):
+            return
         ctx.user_data["await"] = "sample"
         await say(update, tx(ctx, "smp_ask"))
     elif action == "again":
@@ -1747,7 +2184,7 @@ async def on_sample_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx.user_data["await"] = "sample"
             await say(update, tx(ctx, "smp_ask"))
             return
-        await _sample_build(update, ctx, b, data)
+        await _sample_run(update, ctx, b, data)          # описание макета — из кэша, без нового вызова
     elif action == "save":
         st = ctx.user_data.get("smp")
         if not st or st.get("bid") != b["id"]:
@@ -1784,8 +2221,14 @@ async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not db.has_asset(b["id"], "logo"):
         await say(update, tx(ctx, "no_logo"))
         return
+    doc = update.message.document
+    if doc and (doc.mime_type or "").split("/")[0] in ("video", "audio"):
+        await say(update, tx(ctx, "not_photo"), kind="notice")      # видео или звук файлом — не фото
+        return
     if ctx.user_data.get("await") == "sample" and is_editor(b):
         return await on_sample_photo(update, ctx, b)
+    if update.message.media_group_id and update.message.media_group_id == ctx.user_data.get("smp_gid"):
+        return                                  # остальные фото альбома-образца — не пост
     tpls = db.list_templates(b["id"])
     if not tpls:               # настройку бросили до выбора стиля — берём стартовые
         db.seed_templates(b["id"], ctx.user_data.get("lang", "ru"))
@@ -1796,6 +2239,7 @@ async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_image(data):
         await say(update, tx(ctx, "photo_bad"), kind="notice")
         return
+    data = await run(working_copy, data)
     msg = update.message
     gid, cap = msg.media_group_id, marked(msg.caption, msg.caption_entities) if msg.caption else msg.caption
     d = draft(ctx, uid)
@@ -1803,7 +2247,13 @@ async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     same_album = d and gid and d.get("group") == gid
     add_more = (d and not gid and not cap and not d.get("sent") and d["bid"] == b["id"]
                 and now - d["ts"] < DRAFT_TTL)
-    if (same_album or add_more) and d["bid"] == b["id"]:
+    # Больше 10 фото Telegram делит на несколько альбомов по 10 (подпись — только у первого):
+    # фото без подписи сразу следом продолжают тот же пост, как бы ни назывался альбом
+    split_album = (d and gid and not same_album and not cap and not d.get("sent") and d["bid"] == b["id"]
+                   and now - d["ts"] < SPLIT_GAP)
+    if split_album:
+        d["group"] = gid
+    if (same_album or add_more or split_album) and d["bid"] == b["id"]:
         if len(d["photos"]) >= MAX_BATCH:
             if not d.get("warned_max"):
                 d["warned_max"] = True
@@ -1819,8 +2269,6 @@ async def on_quick_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         prefs = db.get_prefs(uid, b["id"])
         tp = next((x for x in tpls if x["id"] == prefs.get("tid")), tpls[0])
         fmt = prefs.get("fmt") if prefs.get("fmt") in FORMATS else "4:5"
-        if fmt == "9:16" and tp["spec"]["story"].get("enabled"):
-            fmt = "4:5"
         title, subtitle, tag, tags, cut = parse_text(cap, R.spec_fields(tp["spec"]))
         if d and d.get("msg"):   # пульт прошлого поста уходит, когда начат новый
             await delete_ids(ctx.bot, update.effective_chat.id, [d["msg"]])
@@ -1879,8 +2327,7 @@ async def on_quick_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if head == "q" and arg == "fmt":
         await answer(update)
-        keys = [k for k in FORMATS if not (k == "9:16" and tp["spec"]["story"].get("enabled"))]
-        main = [k for k in keys if k != "orig"]
+        main = [k for k in FORMATS if k != "orig"]
         rows = [[Btn(("✓ " if k == d["fmt"] else "") + k, callback_data=f"qf:{k}") for k in main[i:i + 3]]
                 for i in range(0, len(main), 3)]
         rows.append([Btn(("✓ " if d["fmt"] == "orig" else "") + tx(ctx, "fmt_orig"), callback_data="qf:orig")])
@@ -1940,7 +2387,7 @@ async def on_quick_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             return
         pw, ph = photo_dims(drafts.read(d["photos"][d.get("cur", 0)]))
-        W, H = R.feed_size(_Size(pw, ph), d["fmt"])
+        W, H = _surface_size(_Size(pw, ph), d["fmt"], surface(tp["spec"], d["fmt"])[1])
         horiz = pw / ph > W / H
         d.setdefault("focus", {})[str(d.get("cur", 0))] = [val, 0.5] if horiz else [0.5, val]
         d["actions"] = d.get("actions", 0) + 1
@@ -1950,8 +2397,6 @@ async def on_quick_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ntp = db.get_template(d["bid"], int(arg)) if arg.isdigit() else None
         if ntp:
             d["tid"] = ntp["id"]
-            if d["fmt"] == "9:16" and ntp["spec"]["story"].get("enabled"):
-                d["fmt"] = "4:5"
             db.set_prefs(uid, d["bid"], tid=ntp["id"], fmt=d["fmt"])
             d["actions"] = d.get("actions", 0) + 1
         redraw = True
@@ -2012,14 +2457,17 @@ async def send_files(update, ctx, d, tp, partial=False):
     if not db.plan_active(b):
         await answer(update, tx(ctx, "no_access_short"), alert=True)
         return
+    # «Файлы ещё раз» по тому же посту не тратят лимит второй раз: уже засчитанные фото — бесплатно
+    counted = min(int(d.get("counted") or 0), n_all)
     left = plan_limits(b)["photos"] - db.photos_used(b["id"])
     _, reset = db.period_bounds(db.get_brand(b["root_id"]) or b)
-    n = min(n_all, max(0, left)) if partial else n_all
-    if n <= 0 or n > left:
+    can = left + counted                         # уже засчитанные фото этого поста — без нового списания
+    n = min(n_all, max(0, can)) if partial else n_all
+    if n <= 0 or n > can:
         await answer(update)
         if left > 0:
             await say(update, tx(ctx, "limit_hit", left=left, n=n_all, reset=fmt_day(reset, lang)),
-                      KB([[Btn(tx(ctx, "b_part", left=left, n=n_all), callback_data="q:part")]]), kind="notice", ttl=120)
+                      KB([[Btn(tx(ctx, "b_part", left=can, n=n_all), callback_data="q:part")]]), kind="notice", ttl=120)
         else:
             await say(update, tx(ctx, "limit_zero", reset=fmt_day(reset, lang), support=esc(SUPPORT)), kind="notice", ttl=90)
         return
@@ -2071,9 +2519,10 @@ async def send_files(update, ctx, d, tp, partial=False):
         db.log_event("error", uid, d["bid"], where="files", draft=d["id"])
         return
     text = post_text(d)
-    if text:
-        await chat.send_message(f"<pre>{esc(text)}</pre>", parse_mode=HTML)
-    db.record_event(d["bid"], uid, tp["id"], ok)
+    for chunk in (split_text(text, 3500) if text else []):
+        await chat.send_message(f"<pre>{esc(chunk)}</pre>", parse_mode=HTML)
+    db.record_event(d["bid"], uid, tp["id"], max(0, ok - counted))
+    d["counted"] = max(counted, ok)
     db.log_event("files", uid, d["bid"], draft=d["id"], n=ok, tid=tp["id"], fmt=d["fmt"], actions=d.get("actions", 0),
                  secs=round(time.time() - d.get("created", time.time())), story=bool(story))
     db.set_prefs(uid, d["bid"], tid=d["tid"], fmt=d["fmt"])
@@ -2090,19 +2539,26 @@ async def send_channel_album(update, ctx, d):
     if not files:
         await on_stale(update, ctx)
         return
-    caption = post_text(d)[:1024]
+    text = post_text(d)
+    # Подпись под альбомом в Telegram — до 1024 знаков. Длиннее: альбом без подписи,
+    # текст поста целиком — следующим сообщением (его тоже можно переслать)
+    long = utf16_len(text) > CAPTION_MAX
+    caption = None if long else (text or None)
     chat = update.effective_chat
     for k in range(0, len(files), ALBUM):
         media = []
         for j, p in enumerate(files[k:k + ALBUM]):
             with open(p, "rb") as f:
-                media.append(InputMediaPhoto(f.read(), caption=caption if (k == 0 and j == 0 and caption) else None))
+                media.append(InputMediaPhoto(f.read(), caption=caption if (k == 0 and j == 0) else None))
         if len(media) == 1:
             await tg_call(chat.send_photo, media[0].media, caption=media[0].caption)
         else:
             await tg_call(ctx.bot.send_media_group, chat.id, media)
-    db.log_event("channel_album", update.effective_user.id, d["bid"], draft=d["id"], n=len(files))
-    await say(update, tx(ctx, "q_channel_hint"), kind="notice", ttl=30)
+    if long:
+        for chunk in split_text(text, 4000):
+            await tg_call(chat.send_message, chunk, disable_web_page_preview=True)
+    db.log_event("channel_album", update.effective_user.id, d["bid"], draft=d["id"], n=len(files), long=long)
+    await say(update, tx(ctx, "q_channel_long" if long else "q_channel_hint"), kind="notice", ttl=45 if long else 30)
 
 
 async def on_quick_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2120,6 +2576,8 @@ async def on_quick_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("q", None)
         drafts.clear(uid)
         d = None
+    if not aw and d and d.get("msg") and update.message and update.message.text:
+        aw = "text"                 # превью открыто, бот ничего не спрашивал: текст — новый «Текст» поста
     if not aw or not d:
         b, _ = current_brand(uid)
         if b:
@@ -2160,7 +2618,8 @@ def admin_text():
             f"Заявок ждут ответа: {pending}\n"
             f"Хранилище: {'постоянное' if db.STORAGE_PERSISTENT else 'ВРЕМЕННОЕ — подключите диск'}\n"
             f"Копии: {'S3' if backups.s3_config() else ('в Telegram' if BACKUP_TO_TELEGRAM else 'только на диске')}\n"
-            f"Редактор: {WEBAPP_URL or 'не задан WEBAPP_URL'}")
+            f"Редактор: {WEBAPP_URL or 'не задан WEBAPP_URL'}\n"
+            f"Стиль по образцу: {('расход ' + quota.summary()) if SMP.enabled() else 'не подключён (VISION_API_KEY)'}")
 
 
 def admin_kb():
@@ -2458,6 +2917,17 @@ async def cmd_myid(update, ctx):
     await update.message.reply_text(f"Telegram ID: <code>{update.effective_user.id}</code>", parse_mode=HTML)
 
 
+NEWCODE_HELP = ("<b>Новый код доступа</b>\n"
+                "<code>/newcode</code> — пилот на {days} дн., код на одного человека.\n"
+                "<code>/newcode pilot 30 1</code> — тариф, сколько дней, сколько человек могут ввести код.\n"
+                "Пример: <code>/newcode media 60 1</code> — Media на 60 дней.\n"
+                "Тарифы: {plans}.")
+EXTEND_HELP = ("<b>Продлить бренд</b>\n"
+               "<code>/extend 3 30</code> — бренду #3 ещё 30 дней.\n"
+               "<code>/extend 3 30 media</code> — то же и сменить тариф на Media.\n"
+               "Номер бренда — в /brands или «Админ → Найти бренд». Тарифы: {plans}.")
+
+
 async def cmd_newcode(update, ctx):
     """/newcode [тариф=pilot] [дней=30] [использований=1]"""
     if not is_admin(update):
@@ -2465,19 +2935,24 @@ async def cmd_newcode(update, ctx):
     a = ctx.args or []
     plan = a[0].lower() if a else "pilot"
     if plan not in db.PLANS:
-        await update.message.reply_text("Тарифы: " + ", ".join(db.PLANS))
+        await update.message.reply_text(NEWCODE_HELP.format(plans=", ".join(db.PLANS), days=PILOT_DAYS), parse_mode=HTML)
         return
     try:
         days = int(a[1]) if len(a) > 1 else PILOT_DAYS
         uses = int(a[2]) if len(a) > 2 else 1
+        if days < 1 or uses < 1:
+            raise ValueError
     except ValueError:
-        await update.message.reply_text("Формат: /newcode pilot 30 1")
+        await update.message.reply_text(NEWCODE_HELP.format(plans=", ".join(db.PLANS), days=PILOT_DAYS), parse_mode=HTML)
         return
     code = db.create_invite(plan, days, uses)
+    who = "на одного человека" if uses == 1 else f"на {uses} человек"
     await update.message.reply_text(
-        f"<code>{code}</code> — {PLAN_LABEL.get(plan, plan)}, {days} дн., использований: {uses}\n\n"
-        f"Для клиента:\nВаш код доступа к NUMBUS: <code>{code}</code>\n"
-        f"Откройте @{ctx.bot.username} и отправьте код.", parse_mode=HTML)
+        f"Код <code>{code}</code>: {PLAN_LABEL.get(plan, plan)} на {days} дн., {who}.\n"
+        f"Перешлите клиенту следующее сообщение.", parse_mode=HTML)
+    await update.message.reply_text(
+        f"Ваш код доступа к NUMBUS: <code>{code}</code>\n"
+        f"Откройте @{ctx.bot.username}, нажмите «Старт» и отправьте этот код.", parse_mode=HTML)
 
 
 async def cmd_codes(update, ctx):
@@ -2530,14 +3005,14 @@ async def cmd_extend(update, ctx):
     try:
         bid, days = int(a[0].lstrip("#")), int(a[1])
     except (IndexError, ValueError):
-        await update.message.reply_text("Формат: /extend 3 30 [media]")
+        await update.message.reply_text(EXTEND_HELP.format(plans=", ".join(db.PLANS)), parse_mode=HTML)
         return
     plan = a[2].lower() if len(a) > 2 else None
     if plan and plan not in db.PLANS:
-        await update.message.reply_text("Тарифы: " + ", ".join(db.PLANS))
+        await update.message.reply_text(EXTEND_HELP.format(plans=", ".join(db.PLANS)), parse_mode=HTML)
         return
     if not db.extend_brand(bid, days, plan):
-        await update.message.reply_text("Бренд не найден.")
+        await update.message.reply_text(f"Бренда #{bid} нет. Номера брендов — в /brands.")
         return
     b = db.get_brand(bid)
     await update.message.reply_text(f"#{bid}: {PLAN_LABEL.get(b['plan'], b['plan'])} до {fmt_date(b['plan_until'])}")
@@ -2555,8 +3030,9 @@ async def on_stale(update, ctx):
 
 
 async def on_orphan(update, ctx):
+    """Видео, стикер, голосовое, GIF, контакт… — бот работает только с фото."""
     L(ctx, update)
-    await say(update, tx(ctx, "stale"), kind="notice")
+    await say(update, tx(ctx, "not_photo"), kind="notice")
 
 
 # ============ Ошибки и оповещения ============
@@ -2564,20 +3040,61 @@ _ALERTS = {}          # подпись ошибки → когда послед�
 ALERT_EVERY = 600
 
 
-async def alert_admins(bot, err, uid=None, where=""):
-    """Сообщает админам об ошибке. Одинаковые ошибки — не чаще раза в 10 минут."""
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _repo_frame(f) -> bool:
+    """Кадр из файлов проекта (bot.py, render.py…), а не из библиотек и стандартной библиотеки Python."""
+    path = os.path.abspath(f.filename)
+    return path.startswith(REPO_DIR + os.sep) and "site-packages" not in path and "dist-packages" not in path
+
+
+def update_action(update) -> str:
+    """Что человек сделал: «кнопка q:send», «фото (альбом)», «команда /start», «текст»…"""
+    if not isinstance(update, Update):
+        return ""
+    if update.callback_query:
+        return f"кнопка {(update.callback_query.data or '')[:40]}"
+    m = update.message or update.edited_message
+    if not m:
+        return "обновление"
+    if m.text:
+        return f"команда {m.text.split()[0][:30]}" if m.text.startswith("/") else "текст"
+    if m.photo:
+        return "фото" + (" (альбом)" if m.media_group_id else "")
+    if m.document:
+        return f"файл {m.document.mime_type or ''}".strip() + (" (альбом)" if m.media_group_id else "")
+    return "сообщение"
+
+
+async def alert_admins(bot, err, uid=None, where="", action=None):
+    """Сообщает админам об ошибке: что случилось, где в коде (файл проекта, а не библиотека),
+    какой обработчик, что сделал человек и кто он. Одинаковые ошибки — не чаще раза в 10 минут."""
     if not ADMIN_IDS or err is None:
         return
     tb = traceback.extract_tb(err.__traceback__) if err.__traceback__ else []
-    frame = next((f for f in reversed(tb) if "site-packages" not in f.filename), tb[-1] if tb else None)
-    place = f"{os.path.basename(frame.filename)}:{frame.lineno} {frame.name}" if frame else where
-    sig = f"{type(err).__name__}|{place}"
+    repo = [f for f in tb if _repo_frame(f)]
+    frame = repo[-1] if repo else next((f for f in reversed(tb) if "site-packages" not in f.filename),
+                                       tb[-1] if tb else None)
+    place = f"{os.path.basename(frame.filename)}:{frame.lineno} {frame.name}" if frame else (where or "—")
+    handler = repo[0].name if repo and repo[0] is not frame else ""
+    code = getattr(err, "status", None) or getattr(err, "code", None)
+    sig = f"{type(err).__name__}|{place}|{code}"      # 401 после «нет денег» — отдельное оповещение
     now = time.time()
     if now - _ALERTS.get(sig, 0) < ALERT_EVERY:
         return
     _ALERTS[sig] = now
+    who = ""
+    if uid:
+        u = db.get_user(uid) or {}
+        who = f"<code>{uid}</code>" + (f" {esc(u['name'])}" if u.get("name") else "") + \
+            (f" @{esc(u['username'])}" if u.get("username") else "")
     text = (f"<b>Ошибка</b> {esc(type(err).__name__)}: {esc(str(err)[:300])}\n"
-            f"Где: <code>{esc(place)}</code>" + (f"\nПользователь: <code>{uid}</code>" if uid else ""))
+            f"Где: <code>{esc(place)}</code>"
+            + (f"\nОбработчик: <code>{esc(handler)}</code>" if handler else "")
+            + (f"\nКонтекст: {esc(where)}" if where else "")
+            + (f"\nДействие: {esc(action)}" if action else "")
+            + (f"\nПользователь: {who}" if who else ""))
     for aid in ADMIN_IDS:
         try:
             await bot.send_message(aid, text, parse_mode=HTML)
@@ -2608,7 +3125,7 @@ async def on_error(update, ctx):
             track(m, "notice", 60)
         except TelegramError:
             pass
-    await alert_admins(ctx.bot, err, uid)
+    await alert_admins(ctx.bot, err, uid, action=update_action(update))
 
 
 # ============ Фоновые задачи: копии и уборка ============
@@ -2649,22 +3166,45 @@ async def job_gc(context: ContextTypes.DEFAULT_TYPE):
 
 # ============ Профиль бота ============
 PROFILE = {
-    "ru": dict(short="Фирменный стиль для фотопостов. Пришлите фото с подписью — получите готовые посты для ленты и сторис.",
-               desc="NUMBUS оформляет фото в стиле вашего бренда. Соберите стиль один раз: логотип, шрифт заголовка, "
-                    "плашки, затемнение. Дальше присылайте фото с подписью: первая строка станет заголовком, #слово — "
-                    "рубрикой. Доступ по приглашениям.",
+    "ru": dict(short="Фото с подписью → готовый пост в стиле вашего канала. Без дизайнера, за минуту.",
+               desc="NUMBUS превращает фото с подписью в готовый пост в стиле вашего канала: логотип, фирменный цвет, "
+                    "шрифт заголовка и рубрика — на своих местах. Стиль собирается один раз за пару минут. Дальше "
+                    "присылайте фото: первая строка подписи станет заголовком, #слово — рубрикой, а через минуту "
+                    "придут файлы без сжатия и текст поста. Карусели до 30 фото, форматы для ленты, сторис и превью "
+                    "ссылок. Доступ по приглашениям.",
                cmds=[("start", "Меню"), ("help", "Как сделать пост"), ("desktop", "Редактор на компьютере"),
                      ("cancel", "Отменить")], menu="Редактор"),
-    "en": dict(short="Brand style for photo posts. Send photos with a caption — get ready posts for the feed and stories.",
-               desc="NUMBUS styles photos in your brand's look. Set up the style once: logo, headline font, plates, "
-                    "shading. Then send photos with a caption: the first line becomes the headline, a #word the section "
-                    "tag. Access by invitation.",
+    "en": dict(short="Photo with a caption → a ready post in your channel's style. No designer, in a minute.",
+               desc="NUMBUS turns a photo with a caption into a ready post in your channel's style: logo, brand colour, "
+                    "headline font and section tag in place. Set up the style once in a couple of minutes. Then send "
+                    "photos: the first caption line becomes the headline, a #word the tag, and a minute later you get "
+                    "uncompressed files and the post text. Carousels up to 30 photos, formats for the feed, stories "
+                    "and link previews. Access by invitation.",
                cmds=[("start", "Menu"), ("help", "How to make a post"), ("desktop", "Editor on a computer"),
                      ("cancel", "Cancel")], menu="Editor"),
 }
 ADMIN_CMDS = [("admin", "Админ-панель"), ("stats", "Статистика пилота"), ("brands", "Все бренды"),
               ("newcode", "Новый код доступа"), ("codes", "Коды"), ("extend", "Продлить бренд"),
               ("backup", "Копия базы"), ("myid", "Мой ID")]
+
+
+STORAGE_WARNED = False
+
+
+async def warn_storage(bot):
+    """Диск Railway не подключён: база живёт во временной папке и пропадёт при деплое.
+    Админам — одно сообщение за запуск (флаг в базе бесполезен: она сама пропадёт)."""
+    global STORAGE_WARNED
+    if STORAGE_WARNED or db.STORAGE_PERSISTENT:
+        return
+    STORAGE_WARNED = True
+    logger.warning("Хранилище временное: %s", db.DATA_DIR)
+    await notify_admins(bot, "<b>Внимание: диск не подключён — данные пропадут при следующем деплое.</b>\n"
+                             "Бренды, стили, коды и черновики сейчас лежат во временной папке "
+                             f"(<code>{esc(db.DATA_DIR)}</code>).\n\n"
+                             "Как исправить: в Railway откройте проект, нажмите ⌘K (или правый клик по пустому месту "
+                             "холста) → Volume → выберите сервис бота → путь <code>/data</code> → Deploy. "
+                             "После перезапуска это предупреждение больше не придёт.")
 
 
 async def post_init(app):
@@ -2693,6 +3233,8 @@ async def post_init(app):
         task = asyncio.create_task(sync_all_menu_buttons(bot))
         _TASKS.add(task)
         task.add_done_callback(_TASKS.discard)
+    if not db.STORAGE_PERSISTENT:
+        await warn_storage(bot)
     if app.job_queue:
         app.job_queue.run_daily(job_backup, time=dtime(hour=BACKUP_HOUR, minute=10, tzinfo=TZ), name="backup")
         app.job_queue.run_repeating(job_gc, interval=3600, first=120, name="drafts_gc")
@@ -2717,6 +3259,7 @@ def build_app(token=None, base_url=None, base_file_url=None, persistence=True):
     app = builder.build()
     IMG = filters.PHOTO | filters.Document.ALL
     TXT = filters.TEXT & ~filters.COMMAND
+    OTHER = filters.ChatType.PRIVATE & ~filters.COMMAND
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", cmd_start),
@@ -2724,17 +3267,20 @@ def build_app(token=None, base_url=None, base_file_url=None, persistence=True):
             CallbackQueryHandler(on_menu, pattern="^menu:"),
             CallbackQueryHandler(on_access_request, pattern="^acc:req$"),
             CallbackQueryHandler(on_wiz_start, pattern="^wiz:start$"),
-            MessageHandler(filters.Regex(CODE_RE), on_code),
+            MessageHandler(filters.TEXT & HAS_CODE, on_code),
         ],
         states={
             MENU: [CallbackQueryHandler(on_switch, pattern=r"^sw:\d+$")],
             CODE: [MessageHandler(TXT, on_code), CallbackQueryHandler(on_code_choice, pattern="^code:")],
             REQ: [MessageHandler(TXT, on_request_text)],
-            K_NAME: [MessageHandler(TXT, on_name)],
-            K_LOGO: [MessageHandler(IMG, on_logo)],
-            K_COLOR: [CallbackQueryHandler(on_color_cb, pattern="^wz:c:"), MessageHandler(TXT, on_color_text)],
+            # у каждого шага — запасной обработчик: неожиданный ответ получает вопрос шага ещё раз
+            # и никогда не уходит в посты
+            K_NAME: [MessageHandler(TXT, on_name), MessageHandler(OTHER, _wiz_other(K_NAME))],
+            K_LOGO: [MessageHandler(IMG, on_logo), MessageHandler(OTHER, _wiz_other(K_LOGO))],
+            K_COLOR: [CallbackQueryHandler(on_color_cb, pattern="^wz:c:"), MessageHandler(TXT, on_color_text),
+                      MessageHandler(OTHER, _wiz_other(K_COLOR))],
             K_PHOTO: [MessageHandler(IMG, on_wiz_photo), CallbackQueryHandler(on_style_pick, pattern="^wz:s:"),
-                      CallbackQueryHandler(on_wiz_skip, pattern="^wz:skip$")],
+                      CallbackQueryHandler(on_wiz_skip, pattern="^wz:skip$"), MessageHandler(OTHER, _wiz_other(K_PHOTO))],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel), CommandHandler("start", cmd_start)],
         allow_reentry=True,
@@ -2790,6 +3336,8 @@ async def amain():
         except NotImplementedError:
             pass
     app = build_app()
+    # ошибки редактора — тем же оповещением админам, что и ошибки бота
+    web.ALERT = lambda err, uid=None, where="": alert_admins(app.bot, err, uid, where)
     # Telegram может быть недоступен (сеть, блокировки): редактор уже работает, бот ждёт связи
     delay = 5
     while not stop.is_set():

@@ -30,7 +30,14 @@ import render as R
 logger = logging.getLogger("numbus.import")
 
 WORK_W = 1920          # ширина, к которой приводится макет
-PSD_MAX_PIXELS = 50_000_000     # 50 Мп: больше — просим уменьшить холст
+# Память: сборка слоёв PSD занимает ~120 байт на пиксель холста (замер: 20 Мп — 2,5 ГБ),
+# поэтому холст — до 16 Мп (4000 × 4000), и ни один слой не больше 16 Мп: картинка,
+# вылезающая далеко за край холста, раскрывается в память целиком.
+PSD_MAX_PIXELS = 16_000_000
+PSD_LAYER_MAX_PIXELS = 16_000_000
+# Высота макета после приведения к ширине 1920: пост и сторис — до 9:16 (3413 px);
+# вытянутая страница PDF (лента, лендинг) отрисовалась бы в гигабайты.
+WORK_MAX_H = 8000
 MAX_PIECES = 24
 
 
@@ -316,6 +323,14 @@ def build(layout, customs=None, customs_names=None):
     return layers, assets, report
 
 
+def check_work_size(w, h):
+    """Макет w×h (в любых единицах) после приведения к ширине WORK_W не выше WORK_MAX_H."""
+    if not (w > 0 and h > 0):
+        raise ImportFail("format")
+    if h * WORK_W / w > WORK_MAX_H:
+        raise ImportFail("too_tall", f"{w:.0f}x{h:.0f}")
+
+
 def _to_work(img):
     """Приводит оверлей к рабочей ширине. Возвращает (картинка, множитель)."""
     if img.width == WORK_W:
@@ -330,6 +345,7 @@ def parse_png(data, name=""):
     a = np.asarray(img.split()[3])
     if (a < 250).mean() < 0.05:
         raise ImportFail("png_opaque")
+    check_work_size(img.width, img.height)
     img, _ = _to_work(img)
     lay = Layout(img.width, img.height, name)
     lay.pieces = segment(img)
@@ -386,6 +402,7 @@ def parse_psd(data, name=""):
     W, H = psd.size
     if W * H > PSD_MAX_PIXELS:      # сборка слоёв такого макета съест всю память сервера
         raise ImportFail("psd_big", f"{W}x{H}")
+    check_work_size(W, H)
     k = WORK_W / W
     lay = Layout(WORK_W, round(H * k), name)
     exclude = set()
@@ -429,6 +446,13 @@ def parse_psd(data, name=""):
                 return False
             p = p.parent
         return L.is_visible()
+    # Размер слоёв — до сборки: слой раскрывается в память целиком, даже если холст маленький
+    for L in psd.descendants():
+        if L.is_group() or not keep(L):
+            continue
+        lw, lh = max(0, L.width), max(0, L.height)
+        if lw * lh > PSD_LAYER_MAX_PIXELS:
+            raise ImportFail("psd_layer_big", f"{L.name}: {lw}x{lh}")
     try:
         overlay = psd.composite(layer_filter=keep, force=True, color=1.0, alpha=0.0)
     except Exception as e:
@@ -463,6 +487,11 @@ def parse_pdf(data, name=""):
         raise ImportFail("ai_bad")
     page = pdf[0]
     Wp, Hp = page.get_size()
+    try:
+        check_work_size(Wp, Hp)          # до отрисовки: высота и площадь ограничены
+    except ImportFail:
+        pdf.close()
+        raise
     k = WORK_W / Wp
     lay = Layout(WORK_W, round(Hp * k), name)
     if len(pdf) > 1:
@@ -579,6 +608,7 @@ def figma_plan(frame):
     x0, y0, Wf, Hf = fb.get("x", 0), fb.get("y", 0), fb.get("width", 0), fb.get("height", 0)
     if Wf <= 0 or Hf <= 0:
         raise ImportFail("figma_not_frame")
+    check_work_size(Wf, Hf)
     k = WORK_W / Wf
     plan = {"W": WORK_W, "H": round(Hf * k), "k": k, "name": frame.get("name", ""),
             "render": [], "slots": [], "logos": [], "warnings": []}
@@ -694,7 +724,7 @@ def parse_file(data, filename=""):
         try:
             return parse_pdf(data, name)
         except ImportFail as e:
-            if (filename or "").lower().endswith(".ai"):
+            if e.code == "ai_bad" and (filename or "").lower().endswith(".ai"):
                 raise ImportFail("ai_nopdf") from e
             raise
     return parse_png(data, name)

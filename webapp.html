@@ -70,7 +70,7 @@ textarea { resize: vertical; min-height: 64px; }
 .btn.block { width: 100%; }
 .seg { display: flex; background: var(--bg2); border-radius: 9px; padding: 2px; flex: 1; min-width: 0; }
 .seg button {
-  flex: 1; border: 0; background: transparent; padding: 7px 4px; border-radius: 7px; font-size: 13px;
+  flex: 1; border: 0; background: transparent; padding: 7px 4px; border-radius: 7px; font-size: 13px; min-height: 40px;
   color: var(--hint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .seg button[aria-pressed="true"] { background: var(--bg); color: var(--fg); font-weight: 600; box-shadow: 0 0 0 1px var(--line); }
@@ -95,7 +95,7 @@ textarea { resize: vertical; min-height: 64px; }
 .frame i:nth-child(4) { right: -16px; bottom: -16px; border-left-width: 1px; border-top-width: 1px; }
 .stagebar { display: flex; gap: 8px; width: 100%; max-width: 520px; align-items: center; }
 .chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
-.chip { border: 1px solid var(--line); background: var(--bg); border-radius: 16px; padding: 5px 11px; font-size: 13px; white-space: nowrap; }
+.chip { border: 1px solid var(--line); background: var(--bg); border-radius: 20px; padding: 8px 14px; min-height: 40px; min-width: 44px; font-size: 13px; white-space: nowrap; flex: 0 0 auto; }
 .chip[aria-pressed="true"] { border-color: var(--fg); font-weight: 600; }
 
 /* ---------- слои ---------- */
@@ -109,14 +109,14 @@ textarea { resize: vertical; min-height: 64px; }
 .icon { border: 0; background: transparent; width: 32px; height: 32px; border-radius: 8px; color: var(--hint); font-size: 16px; flex: 0 0 auto; }
 
 /* ---------- якорь 3×3 ---------- */
-.anchor { display: grid; grid-template-columns: repeat(3, 26px); grid-template-rows: repeat(3, 26px); border: 1px solid var(--line); border-radius: 6px; }
+.anchor { display: grid; grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 40px); border: 1px solid var(--line); border-radius: 8px; }
 .anchor button { border: 0; background: transparent; display: grid; place-items: center; }
 .anchor button::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
 .anchor button[aria-pressed="true"]::after { width: 10px; height: 10px; background: var(--accent); }
 
 /* ---------- цвет ---------- */
-.swatches { display: flex; gap: 8px; flex-wrap: wrap; }
-.sw { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--line); padding: 0; position: relative; }
+.swatches { display: flex; gap: 10px; flex-wrap: wrap; }
+.sw { width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line); padding: 0; position: relative; flex: 0 0 auto; }
 .sw[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); }
 .sw.custom { background: conic-gradient(#f55, #fd5, #5f8, #5cf, #a6f, #f55); }
 .sw input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
@@ -156,7 +156,7 @@ textarea { resize: vertical; min-height: 64px; }
 .modes .seg { flex: 1; }
 .icon.big { font-size: 20px; color: var(--fg); }
 .icon:disabled { opacity: .3; }
-.pts { display: grid; grid-template-columns: repeat(3, 34px); grid-template-rows: repeat(3, 34px); border: 1px solid var(--line); border-radius: 8px; }
+.pts { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); border: 1px solid var(--line); border-radius: 10px; }
 .pts button { border: 0; background: transparent; display: grid; place-items: center; }
 .pts button::after { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
 .pts button[aria-pressed="true"]::after { width: 12px; height: 12px; background: var(--accent); }
@@ -182,6 +182,8 @@ textarea { resize: vertical; min-height: 64px; }
 .boot { min-height: 70vh; display: grid; place-content: center; text-align: center; }
 .boot b { font-size: 22px; letter-spacing: .32em; padding-left: .32em; font-weight: 700; animation: breathe 1.6s ease-in-out infinite; }
 .boot p { color: var(--hint); font-size: 14px; max-width: 320px; margin: 14px auto 0; }
+.boot .btn { margin-top: 18px; min-width: 160px; }
+.cm-hint { margin-top: -2px; }
 @keyframes breathe { 50% { opacity: .35; } }
 /* ---------- готовые стили ---------- */
 .looks { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 4px 0 12px; }
@@ -222,13 +224,13 @@ let SESSION = "";
 /* ---------- тексты ---------- */
 const TT = {
   ru: {
-    templates: "Шаблоны", brand: "Бренд", newTpl: "Новый шаблон", chooseStart: "С чего начать",
+    templates: "Стили", brand: "Бренд", newTpl: "Новый стиль", chooseStart: "С чего начать",
     feed: "Лента", story: "Сторис", feedStory: "Лента и сторис", feedOnly: "Только лента",
     layers: "Слои", addLayer: "Добавить слой", props: "Свойства", previewText: "Текст для превью",
     save: "Сохранить", saved: "Сохранено", check: "Проверить итог", checkCap: "Так пост выйдет из бота — это рендер сервера.",
     ownPhoto: "Своё фото", name: "Название", logo: "Логотип", logoAlt: "Второй логотип",
-    logoAltHint: "Второй логотип — например, горизонтальная версия для обложек. В шаблоне можно выбрать любой.", upload: "Загрузить", replace: "Заменить", remove: "Убрать",
-    palette: "Палитра", paletteHint: "Цвета бренда. В шаблонах на них можно ссылаться — сменили цвет здесь, он обновится везде.",
+    logoAltHint: "Второй логотип — например, горизонтальная версия для обложек. В стиле можно выбрать любой.", upload: "Загрузить", replace: "Заменить", remove: "Убрать",
+    palette: "Палитра", paletteHint: "Цвета бренда. В стилях на них можно ссылаться — сменили цвет здесь, он обновится везде.",
     fonts: "Свои шрифты", fontsHint: "TTF или OTF. Используйте шрифты, на которые у вас есть лицензия.",
     fontSlot: "Загрузить шрифт", hashtags: "Хештеги", hashtagsHint: "Через пробел. Их можно выбирать при создании поста.",
     sample: "Фото для превью", sampleHint: "Типичный кадр из вашей ленты — на нём видно, как ляжет стиль.",
@@ -244,17 +246,19 @@ const TT = {
     tPhoto: "Фото в рамке", zoom: "Масштаб", focusPt: "Фокус", bgCanvas: "Фон кадра", emOn: "Выделение *…*",
     emColor: "Цвет выделения", emWeight: "Вес выделения", tagClean: "Без # и _", afterL: "Под слоем", afterNone: "Нет", gap: "Отступ", gradStart: "Начало от края",
     top: "Верх", bottom: "Низ", left: "Лево", right: "Право", nowrap: "без переноса",
-    storyOff: "Сторис для этого шаблона выключены.", storyOn: "Делать сторис", storyEnable: "Включить сторис",
-    storyHint: "Слои сторис начнутся с копии ленты — дальше их можно менять отдельно.",
-    del: "Удалить слой", dup: "Дублировать", delTpl: "Удалить шаблон", dupTpl: "Дублировать шаблон",
-    confirmDel: "Удалить шаблон? Это нельзя отменить.", unsaved: "Выйти без сохранения?",
-    noLayers: "Слоёв пока нет. Добавьте логотип или текст.", noTpl: "Шаблонов нет — создайте первый.",
-    bgRemoved: "Фон убран автоматически", errLogo: "Не удалось прочитать логотип — пришлите PNG или JPG.",
+    storyOff: "Сторис к каждому посту для этого стиля выключены.", storyOn: "Делать сторис", storyEnable: "Включить сторис",
+    storyHint: "Сторис начнутся в стиле ленты — дальше их можно менять отдельно.",
+    storyHintOwn: "У стиля уже есть раскладка сторис: по ней бот делает посты в формате 9:16. Включите сторис, чтобы менять её и получать к каждому фото ещё и файл 1080×1920.",
+    del: "Удалить слой", dup: "Дублировать", delTpl: "Удалить стиль", dupTpl: "Дублировать стиль",
+    confirmDel: "Удалить стиль? Это нельзя отменить.", unsaved: "Выйти без сохранения?",
+    noLayers: "Слоёв пока нет. Добавьте логотип или текст.", noTpl: "Стилей нет — создайте первый.",
+    bgRemoved: "Фон убран автоматически", errLogo: "Не удалось прочитать логотип — пришлите PNG, JPG, SVG или PDF.",
     errLogoEmpty: "На картинке не видно логотипа — он сливается с фоном.", errFont: "Файл не похож на шрифт TTF/OTF.",
     errPhoto: "Не удалось открыть фото.", errNet: "Нет связи с сервером. Попробуйте ещё раз.",
+    errSave: "Не сохранилось. Попробуйте ещё раз.", errFail: "Не получилось. Попробуйте ещё раз.", retry: "Повторить",
     errAuth: "Откройте редактор кнопкой в боте.", errOwner: "Редактор стиля доступен владельцу и дизайнеру бренда. Чтобы сделать пост, пришлите фото боту.",
-    errLimit: "Достигнут лимит шаблонов.", previewTitle: "Заголовок поста в две строки", previewSub: "Подзаголовок",
-    sheetClose: "Закрыть", selectHint: "Выберите слой в списке или на картинке.", tplName: "Название шаблона",
+    errLimit: "Достигнут лимит стилей.", previewTitle: "Заголовок поста в две строки", previewSub: "Подзаголовок",
+    sheetClose: "Закрыть", selectHint: "Выберите слой в списке или на картинке.", tplName: "Название стиля",
     up: "Выше", down: "Ниже", hide: "Скрыть", show: "Показать",
     tImage: "Графика", tImageAdd: "Картинка (PNG)", fitImg: "Размер", fitBox: "Свой", fitCover: "Заполнить", fitStretch: "Растянуть",
     importBtn: "Импорт из макета", importTitle: "Импорт из макета", importStory: "Импортировать сторис из макета",
@@ -275,15 +279,18 @@ const TT = {
     e_figma_token: "Figma не приняла токен. Проверьте его и доступ «File content: read».", e_figma_access: "С этим токеном нет доступа к файлу.",
     e_figma_rate: "Figma просит подождать минуту — попробуйте ещё раз.", e_figma_not_frame: "Ссылка ведёт не на фрейм — выделите фрейм целиком.",
     e_figma_timeout: "Figma долго не отвечает — попробуйте ещё раз.", e_empty: "В макете не нашлось ничего, кроме фото.",
-    e_import_failed: "Не удалось разобрать макет.", e_http413: "Файл больше 60 МБ.",
+    e_import_failed: "Не удалось разобрать макет.", e_http413: "Файл больше 60 МБ.", e_file_big: "Файл больше 60 МБ.",
+    e_font_big: "Файл шрифта больше 10 МБ.", e_too_big: "Слишком большой запрос.",
+    e_too_tall: "Макет слишком вытянутый. Нужен формат поста или сторис — например, 1080 × 1350 или 1080 × 1920.",
+    e_psd_layer_big: "В макете есть слой больше 16 мегапикселей — обычно это большая картинка за краем холста. Уменьшите или обрежьте её и попробуйте снова.",
     modeStyle: "Стиль", modeLayers: "Слои", where: "Где", addLogo: "Добавить логотип", addTitle: "Добавить заголовок",
     shade: "Затемнение", shadeNone: "Нет", shadeAll: "Всё фото", strength: "Плотность", showTag: "Показывать",
     corner: "Угол", look: "Вид", lookText: "Текст", fine: "Тонкая настройка слоёв", undo: "Отменить", redo: "Вернуть",
     logout: "Выйти на этом компьютере", errLogin: "Вход истёк или ссылка уже использована. Запросите новую в боте командой /desktop.",
-    back: "Шаблоны", close: "Закрыть", place: "Положение",
+    back: "Стили", close: "Закрыть", place: "Положение",
     modeSimple: "Простой", modeDesigner: "Для дизайнера", looks: "Готовые стили",
     looksHint: "Нажмите на стиль, чтобы примерить его. Вернуть как было — «Отменить» над картинкой.",
-    brandColors: "Цвета бренда", brandColorsHint: "Цвета общие для всех шаблонов бренда.", fromLogo: "Взять из логотипа",
+    brandColors: "Цвета бренда", brandColorsHint: "Цвета общие для всех стилей бренда.", fromLogo: "Взять из логотипа",
     fromLogoNone: "В логотипе нет ярких цветов — выберите акцент сами.", fromLogoPick: "Нажмите на цвет, чтобы сделать его акцентом.",
     fontPair: "Шрифты", pairOwn: "Свой набор", ownFont: "Свой шрифт",
     cover: "Обложка", slide2: "Кадр 2", safeZones: "Безопасные зоны",
@@ -292,7 +299,7 @@ const TT = {
     slidesRule: "Где показывать", slidesAll: "На всех", slidesFirst: "Обложка", slidesRest: "Кроме обложки",
     lines: "Строк максимум", linesNone: "без ограничения", shadow: "Тень", shadowBlur: "Размытие",
     shadowOpacity: "Плотность тени", shadowColor: "Цвет тени",
-    fromLayout: "Из макета: PSD, AI, PDF или Figma", blankHint: "Пустой шаблон — соберите слои сами",
+    fromLayout: "Из макета: PSD, AI, PDF или Figma", blankHint: "Пустой стиль — соберите слои сами",
     noteCut: "Заголовок не поместился — в посте он будет обрезан многоточием. Сократите текст или уменьшите кегль.",
     noteSmall: "Заголовок длинный — в посте шрифт станет немного меньше.",
     fontMissing: "В шрифте нет знаков {list} — их нарисует Inter.", fontSample: "Съешь ещё этих мягких булок — 350 ₽, № 5",
@@ -302,9 +309,12 @@ const TT = {
     center: "Центр", middle: "Середина", tl: "Слева сверху", tr: "Справа сверху", bl: "Слева снизу", br: "Справа снизу",
     caseNone: "Как есть", caseUpper: "ПРОПИСНЫЕ", caseLower: "строчные", srcRubric: "Рубрика", srcLabel: "Надпись",
     visible: "видно", hiddenL: "скрыт", errRate: "Слишком много запросов подряд — подождите минуту.",
-    e_psd_big: "Макет слишком большой — больше 50 мегапикселей. Уменьшите холст и попробуйте снова.",
-    e_logo_big: "Файл слишком большой — больше 100 мегапикселей. Загрузите логотип поменьше.",
-    loading: "Загружаю стиль…", modeHintDesigner: "Слои, безопасные зоны, импорт макетов.", toDesigner: "Режим для дизайнера",
+    e_psd_big: "Макет слишком большой — больше 16 мегапикселей (например, 4000 × 4000). Уменьшите холст и попробуйте снова.",
+    e_logo_big: "Файл слишком большой — больше 25 мегапикселей. Загрузите логотип поменьше.",
+    loading: "Загрузка стиля…", modeHintDesigner: "Слои, безопасные зоны, импорт макетов.", toDesigner: "Режим для дизайнера",
+    sizeS: "Размер", alignS: "Выравнивание", plateS: "Подложка",
+    cm_fixed: "Один цвет на любом фото.", cm_adaptive: "Цвет из фото под слоем — чуть светлее или темнее фона.",
+    cm_contrast: "Светлый цвет на тёмном фото, тёмный — на светлом.", cm_original: "Логотип в своих цветах, без перекраски.",
   },
   en: {
     templates: "Templates", brand: "Brand", newTpl: "New template", chooseStart: "Start from",
@@ -330,13 +340,15 @@ const TT = {
     emColor: "Highlight colour", emWeight: "Highlight weight", tagClean: "No # and _", afterL: "Below layer", afterNone: "None", gap: "Gap", gradStart: "Start from edge",
     top: "Top", bottom: "Bottom", left: "Left", right: "Right", nowrap: "no wrap",
     storyOff: "Stories are off for this template.", storyOn: "Make stories", storyEnable: "Turn on stories",
-    storyHint: "Story layers start as a copy of the feed — then you can change them separately.",
+    storyHint: "Stories start in the feed's style — then you can change them separately.",
+    storyHintOwn: "This style already has a story layout: the bot uses it for 9:16 posts. Turn stories on to edit it and to get a 1080×1920 file with every photo.",
     del: "Delete layer", dup: "Duplicate", delTpl: "Delete template", dupTpl: "Duplicate template",
     confirmDel: "Delete this template? This can't be undone.", unsaved: "Leave without saving?",
     noLayers: "No layers yet. Add a logo or text.", noTpl: "No templates — create your first one.",
-    bgRemoved: "Background removed automatically", errLogo: "Couldn't read the logo — send a PNG or JPG.",
+    bgRemoved: "Background removed automatically", errLogo: "Couldn't read the logo — send a PNG, JPG, SVG or PDF.",
     errLogoEmpty: "No logo visible in the image — it blends into the background.", errFont: "This file doesn't look like a TTF/OTF font.",
     errPhoto: "Couldn't open the photo.", errNet: "Can't reach the server. Try again.",
+    errSave: "Not saved. Please try again.", errFail: "That didn't work. Please try again.", retry: "Try again",
     errAuth: "Open the editor with the button in the bot.", errOwner: "The style editor is available to the brand owner and designer. To make a post, send photos to the bot.",
     errLimit: "Template limit reached.", previewTitle: "A two-line post headline", previewSub: "Subheadline",
     sheetClose: "Close", selectHint: "Pick a layer in the list or on the image.", tplName: "Template name",
@@ -360,7 +372,10 @@ const TT = {
     e_figma_token: "Figma rejected the token. Check it and the “File content: read” scope.", e_figma_access: "This token has no access to the file.",
     e_figma_rate: "Figma asks to wait a minute — try again.", e_figma_not_frame: "The link doesn't point to a frame — select the whole frame.",
     e_figma_timeout: "Figma is taking too long — try again.", e_empty: "The layout has nothing but the photo.",
-    e_import_failed: "Couldn't read the layout.", e_http413: "The file is over 60 MB.",
+    e_import_failed: "Couldn't read the layout.", e_http413: "The file is over 60 MB.", e_file_big: "The file is over 60 MB.",
+    e_font_big: "The font file is over 10 MB.", e_too_big: "The request is too large.",
+    e_too_tall: "The layout is too tall. Use a post or story format — e.g. 1080 × 1350 or 1080 × 1920.",
+    e_psd_layer_big: "The layout has a layer over 16 megapixels — usually a large image extending past the canvas. Scale it down or crop it and try again.",
     modeStyle: "Style", modeLayers: "Layers", where: "Position", addLogo: "Add logo", addTitle: "Add headline",
     shade: "Shade", shadeNone: "None", shadeAll: "Whole photo", strength: "Strength", showTag: "Show",
     corner: "Corner", look: "Look", lookText: "Text", fine: "Fine-tune layers", undo: "Undo", redo: "Redo",
@@ -387,9 +402,12 @@ const TT = {
     center: "Centre", middle: "Middle", tl: "Top left", tr: "Top right", bl: "Bottom left", br: "Bottom right",
     caseNone: "As typed", caseUpper: "UPPERCASE", caseLower: "lowercase", srcRubric: "Tag", srcLabel: "Label",
     visible: "shown", hiddenL: "hidden", errRate: "Too many requests in a row — wait a minute.",
-    e_psd_big: "The layout is too large — over 50 megapixels. Reduce the canvas and try again.",
-    e_logo_big: "The file is too large — over 100 megapixels. Upload a smaller logo.",
+    e_psd_big: "The layout is too large — over 16 megapixels (e.g. 4000 × 4000). Reduce the canvas and try again.",
+    e_logo_big: "The file is too large — over 25 megapixels. Upload a smaller logo.",
     loading: "Loading your style…", modeHintDesigner: "Layers, safe zones, layout import.", toDesigner: "Designer mode",
+    sizeS: "Size", alignS: "Alignment", plateS: "Background",
+    cm_fixed: "One colour on every photo.", cm_adaptive: "Taken from the photo underneath — a little lighter or darker than it.",
+    cm_contrast: "Light on dark photos, dark on light ones.", cm_original: "The logo in its own colours, not recoloured.",
   },
 };
 let LANG = "ru";
@@ -439,12 +457,26 @@ async function api(method, path, body, isForm) {
   }
   return r;
 }
-function errText(e) {
+// Что сказать человеку: нет связи — одно, ошибка сервера — другое (ctx "save" — при сохранении)
+function errText(e, ctx) {
   if (e.code === "auth" && !IN_TG) return t("errLogin");
   if (e.code && TT.ru["e_" + e.code]) return t("e_" + e.code);
-  return ({ net: t("errNet"), auth: t("errAuth"), owner_only: t("errOwner"), logo_bad: t("errLogo"), rate: t("errRate"),
-            logo_empty: t("errLogoEmpty"), font_bad: t("errFont"), photo_bad: t("errPhoto"), limit: t("errLimit") })[e.code] || t("errNet");
+  const known = ({ net: t("errNet"), auth: t("errAuth"), owner_only: t("errOwner"), logo_bad: t("errLogo"), rate: t("errRate"),
+            logo_empty: t("errLogoEmpty"), font_bad: t("errFont"), photo_bad: t("errPhoto"), limit: t("errLimit") })[e.code];
+  return known || (ctx === "save" ? t("errSave") : t("errFail"));
 }
+// Несохранённые правки: Telegram переспросит перед закрытием, браузер — перед уходом со страницы
+function closingGuard(on) {
+  if (!IN_TG || !tg) return;
+  try {
+    if (tg.isVersionAtLeast && !tg.isVersionAtLeast("6.2")) return;
+    if (on && tg.enableClosingConfirmation) tg.enableClosingConfirmation();
+    else if (!on && tg.disableClosingConfirmation) tg.disableClosingConfirmation();
+  } catch (e) {}
+}
+window.addEventListener("beforeunload", e => {
+  if (!IN_TG && APP.screen === "editor" && APP.dirty) { e.preventDefault(); e.returnValue = ""; }
+});
 async function blobImage(blob) {
   const url = URL.createObjectURL(blob);
   const img = new Image();
@@ -1068,7 +1100,7 @@ function setMain(text, fn) {
 
 function go(screen) {
   APP.screen = screen;
-  if (screen !== "editor") { setMain(null); setBack(null); }
+  if (screen !== "editor") { setMain(null); setBack(null); closingGuard(false); }
   const r = root();
   r.innerHTML = "";
   r.className = "";
@@ -1223,9 +1255,10 @@ function saveKit(patch, after) {
       if (res.brand) Object.assign(APP.state.brand, res.brand);
       toast(t("saved"));
       after && after();
-    } catch (e) { toast(errText(e)); }
+    } catch (e) { toast(errText(e, "save")); }
   }, 500);
 }
+const LOGO_ACCEPT = "image/*,.svg,image/svg+xml,.pdf,application/pdf";
 function pickFile(accept, cb) {
   const inp = h("input", { type: "file", accept, style: "display:none" });
   inp.addEventListener("change", () => { if (inp.files[0]) cb(inp.files[0]); inp.remove(); });
@@ -1321,7 +1354,7 @@ function renderBrand(r) {
           style: logoIsDark(img) ? "filter: brightness(0) invert(1)" : null }) : null)),
       h("div", { style: "flex:1;min-width:0" }, label),
       img && k === "logo_alt" ? h("button", { class: "btn danger", onclick: async () => { await api("DELETE", `asset/${k}`); await loadState(); go("brand"); } }, t("remove")) : null,
-      h("button", { class: "btn ghost", onclick: () => pickFile("image/*", async f => { await upload(k, f); go("brand"); }) }, img ? t("replace") : t("upload"))));
+      h("button", { class: "btn ghost", onclick: () => pickFile(LOGO_ACCEPT, async f => { await upload(k, f); go("brand"); }) }, img ? t("replace") : t("upload"))));
   }
   s2.append(h("p", { class: "hint" }, t("logoAltHint")));
   r.append(s2);
@@ -1525,6 +1558,7 @@ function fitStage() {
   cv.style.height = Math.round(H * k) + "px";
 }
 function updateSaveUI() {
+  closingGuard(APP.screen === "editor" && APP.dirty);
   const label = t("save");
   if (!setMain(label, saveTemplate)) {
     const fb = document.getElementById("fallback-save");
@@ -1543,7 +1577,7 @@ async function saveTemplate() {
     updateSaveUI();
     toast(t("saved"));
     haptic("success");
-  } catch (e) { toast(errText(e)); haptic("error"); }
+  } catch (e) { toast(errText(e, "save")); haptic("error"); }
   finally { mb && mb.hideProgress && mb.hideProgress(); }
 }
 async function leaveEditor() {
@@ -1560,14 +1594,18 @@ function renderEditor(r) {
   // --- сцена (слева на компьютере, сверху на телефоне) ---
   const cv = h("canvas", { id: "stage", "aria-label": APP.tpl.name, tabindex: "0" });
   const fileBtn = h("button", { class: "chip", onclick: () => pickFile("image/*", async f => { APP.localPhoto = await blobImage(f); schedule(); buildLooks(); }) }, t("ownPhoto"));
+  // 9:16 у стиля со слоями сторис — это сторис (так же рисует бот): кнопка открывает поверхность сторис
   const fmts = APP.surface === "story" ? [] : Object.keys(FEED_SIZES).filter(k => !(k === "9:16" && spec.story.enabled));
+  const storyFor916 = spec.story.layers.length > 0;
   // обложка и следующий кадр карусели выглядят по-разному, если у слоёв есть правило кадров или счётчик
   const slides = [...spec.feed.layers, ...spec.story.layers].some(L => L.slides || (L.type === "text" && L.source === "counter"));
   if (!slides) APP.slide = 1;
-  const chips = fmts.map(f => h("button", { class: "chip", "aria-pressed": String(APP.fmt === f), onclick: () => { APP.fmt = f; go("editor"); } }, f));
+  const chips = fmts.map(f => h("button", { class: "chip", "aria-pressed": String(APP.fmt === f), onclick: () => {
+    if (f === "9:16" && storyFor916) { APP.surface = "story"; APP.sel = null; } else APP.fmt = f;
+    go("editor"); } }, f));
   if (slides) chips.push(...[[1, t("cover")], [2, t("slide2")]].map(([i, l]) =>
     h("button", { class: "chip", "aria-pressed": String(APP.slide === i), onclick: () => { APP.slide = i; go("editor"); } }, l)));
-  chips.push(fileBtn);
+  chips.unshift(fileBtn);          // «Своё фото» — первым: в конце ряда его не видно на телефоне
   if (designer) chips.push(h("button", { class: "chip", "aria-pressed": String(APP.safe), onclick: () => { APP.safe = !APP.safe; go("editor"); } }, t("safeZones")));
   const stage = h("div", { class: "stage" },
     h("div", { class: "stagebar" },
@@ -1584,6 +1622,7 @@ function renderEditor(r) {
   bindDrag(cv);
 
   if (!IN_TG) side.append(h("div", { class: "modes" }, h("button", { class: "btn ghost", onclick: leaveEditor }, t("back"))));
+  side.append(previewFields());   // текст для превью — сразу под картинкой
   side.append(h("div", { class: "modes" }, h("div", { class: "seg", role: "group" },
     ...[["simple", t("modeSimple")], ["designer", t("modeDesigner")]].map(([m, l]) =>
       h("button", { "aria-pressed": String(APP.mode === m), onclick: () => { if (APP.mode !== m) APP.sel = null; setMode(m); go("editor"); } }, l)))));
@@ -1594,7 +1633,7 @@ function renderEditor(r) {
 
   if (APP.surface === "story" && !spec.story.enabled) {
     side.append(h("div", { class: "section" },
-      h("p", {}, t("storyOff")), h("p", { class: "hint" }, t("storyHint")),
+      h("p", {}, t("storyOff")), h("p", { class: "hint" }, t(spec.story.layers.length ? "storyHintOwn" : "storyHint")),
       h("div", { class: "row" }, h("button", { class: "btn primary", onclick: () => {
         spec.story.enabled = true;
         if (!spec.story.layers.length) spec.story.layers = clone(spec.feed.layers).map(L => ({ ...L, id: uid() }));
@@ -1620,7 +1659,6 @@ function renderEditor(r) {
     side.append(h("div", { class: "section drawer", id: "props" }));
     renderProps();
   }
-  side.append(previewFields());
   tail(side);
   updateUndoUI();
   requestAnimationFrame(draw);
@@ -1638,11 +1676,12 @@ function buildLooks() {
   }
   box.append(grid, h("p", { class: "hint", style: "margin-top:0" }, t("looksHint")));
 }
+// Стиль меняется целиком: и лента, и сторис (у стиля своя раскладка сторис с безопасными
+// зонами; если её нет — копия ленты). Иначе лента и сторис одного шаблона расходятся.
 function applyLook(p) {
-  const key = APP.surface === "story" ? "story" : "feed";
-  let src = p.spec[key].layers;
-  if (key === "story" && !src.length) src = p.spec.feed.layers;
-  APP.tpl.spec[key].layers = clone(src).map(L => ({ ...L, id: uid() }));
+  const fresh = src => clone(src).map(L => ({ ...L, id: uid() }));
+  APP.tpl.spec.feed.layers = fresh(p.spec.feed.layers);
+  APP.tpl.spec.story.layers = fresh(p.spec.story.layers.length ? p.spec.story.layers : p.spec.feed.layers);
   APP.sel = null;
   markDirty();
   renderSimple();
@@ -1766,13 +1805,16 @@ function slider(label, get, set, min, max, step, fmt) {
   inp.addEventListener("input", () => { set(parseFloat(inp.value)); out.textContent = fmt(get()); markDirty(); });
   return row(label, inp, out);
 }
-function seg(label, opts, get, set, rebuild) {
+function seg(label, opts, get, set, rebuild, stacked) {
   const box = h("div", { class: "seg", role: "group", "aria-label": label });
   const paint = () => [...box.children].forEach((b, i) => b.setAttribute("aria-pressed", String(opts[i][0] === get())));
   opts.forEach(([v, l]) => box.append(h("button", { onclick: () => { set(v); paint(); markDirty(); if (rebuild) renderProps(); } }, l)));
   paint();
-  return label ? row(label, box) : box;
+  if (!label) return box;
+  // stacked — подпись над кнопками: на телефоне им хватает ширины, ничего не обрезается
+  return stacked ? h("div", { class: "row stacked" }, h("label", {}, label), box) : row(label, box);
 }
+const segS = (label, opts, get, set) => seg(label, opts, get, set, false, true);
 function sw(on, set) {
   const b = h("button", { class: "switch", role: "switch", "aria-checked": String(!!on) });
   b.addEventListener("click", () => { const v = b.getAttribute("aria-checked") !== "true"; b.setAttribute("aria-checked", String(v)); set(v); });
@@ -1813,6 +1855,7 @@ function colorCtl(label, get, set, opts) {
     else set({ mode: m });
     renderProps();
   }));
+  if (APP.mode !== "designer" && TT.ru["cm_" + spec.mode]) wrap.append(h("div", { class: "hint cm-hint" }, t("cm_" + spec.mode)));
   const pick = (value, onPick) => {
     const box = h("div", { class: "swatches" });
     APP.state.brand.palette.forEach((c, i) => box.append(h("button", {
@@ -1890,7 +1933,7 @@ function renderSimple() {
   } }, "+ " + t("addLogo")))));
   else box.append(card(t("logo"),
     pointGrid(t("where"), lg.anchor, a => { lg.anchor = a; lg.x = a[1] === "c" ? 0 : M; lg.y = a[0] === "m" ? 0 : M; }),
-    seg(t("width"), [[0.1, "S"], [0.14, "M"], [0.19, "L"]], () => nearest(lg.w, [0.1, 0.14, 0.19]), v => lg.w = v),
+    segS(t("sizeS"), [[0.1, "S"], [0.14, "M"], [0.19, "L"]], () => nearest(lg.w, [0.1, 0.14, 0.19]), v => lg.w = v),
     colorCtl(t("color"), () => lg.color, c => { lg.color = c; markDirty(); }, { original: true })));
 
   // Заголовок: шрифты парой, кегль, положение
@@ -1914,15 +1957,15 @@ function renderSimple() {
     });
     box.append(card(t("srcTitle"),
       row(t("fontPair"), fs),
-      seg(t("size"), [[0.045, "S"], [0.058, "M"], [0.068, "L"], [0.085, "XL"]], () => nearest(ti.size, [0.045, 0.058, 0.068, 0.085]), v => ti.size = v),
-      seg(t("place"), [["t", t("top")], ["m", t("middle")], ["b", t("bottom")]], () => ti.anchor[0], v => {
+      segS(t("sizeS"), [[0.045, "S"], [0.058, "M"], [0.068, "L"], [0.085, "XL"]], () => nearest(ti.size, [0.045, 0.058, 0.068, 0.085]), v => ti.size = v),
+      segS(t("place"), [["t", t("top")], ["m", t("middle")], ["b", t("bottom")]], () => ti.anchor[0], v => {
         ti.anchor = v + ti.anchor[1]; ti.y = v === "m" ? 0 : M;
       }),
-      seg(t("align"), [["left", t("left")], ["center", t("center")], ["right", t("right")]], () => ti.align, v => {
+      segS(t("alignS"), [["left", t("left")], ["center", t("center")], ["right", t("right")]], () => ti.align, v => {
         ti.align = v; const hz = v === "left" ? "l" : v === "right" ? "r" : "c";
         ti.anchor = ti.anchor[0] + hz; ti.x = hz === "c" ? 0 : (ti.plate ? 0 : M); if (!ti.maxw) ti.maxw = 0.84;
       }),
-      h("div", { class: "row" }, h("label", {}, t("plate")), h("div", { class: "ctl", style: "justify-content:flex-end" },
+      h("div", { class: "row" }, h("label", {}, t("plateS")), h("div", { class: "ctl", style: "justify-content:flex-end" },
         sw(!!ti.plate, v => {
           if (v) { ti.plate = { color: { mode: "fixed", value: "p2" }, opacity: 1, radius: 0, padx: 1.2, pady: 0.7 }; if (ti.anchor[1] === "l") ti.x = 0; }
           else { delete ti.plate; if (ti.anchor[1] === "l") ti.x = M; }
@@ -1946,7 +1989,7 @@ function renderSimple() {
         tg_.anchor = a; tg_.x = a[1] === "c" ? 0 : M; tg_.y = a[0] === "m" ? 0 : M;
         tg_.align = a[1] === "r" ? "right" : a[1] === "c" ? "center" : "left";
       }),
-      seg(t("look"), [["plain", t("lookText")], ["plate", t("plate")]], () => tg_.plate ? "plate" : "plain", v => {
+      segS(t("look"), [["plain", t("lookText")], ["plate", t("plateS")]], () => tg_.plate ? "plate" : "plain", v => {
         if (v === "plate") { tg_.plate = { color: { mode: "fixed", value: "p2" }, opacity: 1, radius: 0.5, padx: 0.75, pady: 0.55 }; tg_.color = { ...CT }; }
         else { delete tg_.plate; tg_.color = { ...CT }; }
       }));
@@ -2354,7 +2397,36 @@ async function deleteTemplate() {
 
 /* ---------- старт ---------- */
 window.addEventListener("resize", () => APP.screen === "editor" && fitStage());
+// Экран загрузки: «Загружаю стиль…», при ошибке — что случилось и «Повторить»
+function bootScreen(msg, retry) {
+  const r = root();
+  r.innerHTML = "";
+  r.className = "";
+  const box = h("div", { class: "boot", id: "boot", role: "status" },
+    h("b", retry !== undefined ? { style: "animation:none" } : {}, "NUMBUS"), h("p", {}, msg));
+  if (retry) box.append(h("div", {}, h("button", { class: "btn primary", onclick: retry }, t("retry"))));
+  r.append(box);
+}
+function withTimeout(p, ms) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => { const e = new Error("net"); e.code = "net"; rej(e); }, ms))]);
+}
+async function start() {
+  bootScreen(t("loading"));
+  try {
+    await withTimeout(loadState(), 30000);
+    go("templates");
+  } catch (e) {
+    // без прав или вход истёк — повтор не поможет; нет связи или сбой сервера — поможет
+    const final = ["auth", "owner_only", "link"].includes(e.code);
+    bootScreen(errText(e), final ? null : start);
+  }
+}
 (async function boot() {
+  try {   // язык до ответа сервера — из Telegram (как решит сервер: «en…» — английский, иначе русский)
+    const lc = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.language_code) || "";
+    LANG = /^en/i.test(lc) ? "en" : "ru";
+  } catch (e) {}
+  bootScreen(t("loading"));
   if (IN_TG) {
     try { tg.ready(); tg.expand(); tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (e) {}
   } else {
@@ -2372,14 +2444,7 @@ window.addEventListener("resize", () => APP.screen === "editor" && fitStage());
     }
     try { SESSION = SESSION || localStorage.getItem(key) || ""; } catch (e) {}
   }
-  try {
-    await loadState();
-    go("templates");
-  } catch (e) {
-    const b = document.getElementById("boot") || root();
-    b.innerHTML = "";
-    b.append(h("b", { style: "animation:none" }, "NUMBUS"), h("p", {}, errText(e)));
-  }
+  await start();
 })();
 window.NB = { renderSurface, ensureFont, fontsOf, ensureImage, imagesOf, IMG_STATE, APP, importSheet };
 </script>

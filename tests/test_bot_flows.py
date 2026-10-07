@@ -66,7 +66,7 @@ def test_code_onboarding(fresh_db):
             assert "wz:c:0" in cbs and "wz:c:own" in cbs
             await u.press("wz:c:own")
             await u.text("#12")                               # плохой цвет
-            assert "Не понял цвет" in u.last_text()
+            assert "Цвет не распознан" in u.last_text()
             await u.text("#E4572E")
             assert "Шаг 4 из 4" in u.last_text()
             await u.photo(make_photo(seed=3), caption="Открываемся в субботу #новости")
@@ -135,7 +135,7 @@ def test_post_flow(fresh_db):
                 assert need in cbs, (need, cbs)
             # горизонтальное фото в 4:5 обрезается — есть кнопки выбора части
             assert any(c.startswith("q:fc:") for c in cbs)
-            assert "Уходит" in body(pult)
+            assert "Обрезается" in body(pult)
             await u.press("q:fc:0.0")
             d = h.app.user_data[521]["q"]
             assert d["focus"]["0"] == [0.0, 0.5]

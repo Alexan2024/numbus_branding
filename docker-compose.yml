@@ -1,5 +1,5 @@
 # Сервер в России (Selectel, Timeweb Cloud, Yandex Cloud, VK Cloud): бот + редактор и Caddy,
-# который сам получает HTTPS-сертификат для домена. Запуск: cp .env.example .env → заполнить →
+# который сам получает HTTPS-сертификат для домена. Запуск: cp env.example.txt .env → заполнить →
 # docker compose up -d --build. База, копии и черновики — в папке ./data рядом с этим файлом.
 services:
   bot:
